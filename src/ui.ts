@@ -53,7 +53,7 @@ function renderHome(): void {
   const raízesPorÁrea = (área: Área) =>
     todasFrentes.filter((f) => f.área === área && f.parentId === null)
 
-  let html = `<h1>Controle Pessoal</h1>`
+  let html = `<h1>Pulse</h1>`
   html += `<p class="meta-row">O que está acontecendo com as coisas que fazem parte da minha vida.</p>`
 
   for (const área of ÁREAS) {

@@ -1,4 +1,4 @@
-# Controle Pessoal
+# Pulse
 
 Painel de estado da vida — não é agenda, não é lista de tarefas. Responde
 "o que está acontecendo com as coisas que fazem parte da minha vida",
