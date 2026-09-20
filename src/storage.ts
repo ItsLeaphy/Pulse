@@ -9,13 +9,13 @@ import type { Frente, Registro } from './types'
 // ============================================================
 
 export interface StorageAdapter {
-  getFrentes(): Frente[]
-  getFrente(id: string): Frente | undefined
-  salvarFrente(f: Frente): void
-  removerFrente(id: string): void
+  getFrentes(): Promise<Frente[]>
+  getFrente(id: string): Promise<Frente | undefined>
+  salvarFrente(f: Frente): Promise<void>
+  removerFrente(id: string): Promise<void>
 
-  getRegistros(frenteId: string): Registro[]
-  salvarRegistro(r: Registro): void
+  getRegistros(frenteId: string): Promise<Registro[]>
+  salvarRegistro(r: Registro): Promise<void>
 }
 
 const CHAVE_FRENTES = 'controle-pessoal:frentes'
@@ -40,15 +40,15 @@ export class LocalStorageAdapter implements StorageAdapter {
     localStorage.setItem(CHAVE_REGISTROS, JSON.stringify(registros))
   }
 
-  getFrentes(): Frente[] {
+  async getFrentes(): Promise<Frente[]> {
     return this.lerFrentes()
   }
 
-  getFrente(id: string): Frente | undefined {
+  async getFrente(id: string): Promise<Frente | undefined> {
     return this.lerFrentes().find((f) => f.id === id)
   }
 
-  salvarFrente(f: Frente): void {
+  async salvarFrente(f: Frente): Promise<void> {
     const frentes = this.lerFrentes()
     const idx = frentes.findIndex((x) => x.id === f.id)
     if (idx >= 0) frentes[idx] = f
@@ -56,17 +56,17 @@ export class LocalStorageAdapter implements StorageAdapter {
     this.escreverFrentes(frentes)
   }
 
-  removerFrente(id: string): void {
+  async removerFrente(id: string): Promise<void> {
     this.escreverFrentes(this.lerFrentes().filter((f) => f.id !== id))
   }
 
-  getRegistros(frenteId: string): Registro[] {
+  async getRegistros(frenteId: string): Promise<Registro[]> {
     return this.lerRegistros()
       .filter((r) => r.frenteId === frenteId)
       .sort((a, b) => b.data - a.data)
   }
 
-  salvarRegistro(r: Registro): void {
+  async salvarRegistro(r: Registro): Promise<void> {
     const registros = this.lerRegistros()
     registros.push(r)
     this.escreverRegistros(registros)
@@ -82,29 +82,29 @@ export class MemoryAdapter implements StorageAdapter {
   private frentes = new Map<string, Frente>()
   private registros: Registro[] = []
 
-  getFrentes(): Frente[] {
+  async getFrentes(): Promise<Frente[]> {
     return [...this.frentes.values()]
   }
 
-  getFrente(id: string): Frente | undefined {
+  async getFrente(id: string): Promise<Frente | undefined> {
     return this.frentes.get(id)
   }
 
-  salvarFrente(f: Frente): void {
+  async salvarFrente(f: Frente): Promise<void> {
     this.frentes.set(f.id, f)
   }
 
-  removerFrente(id: string): void {
+  async removerFrente(id: string): Promise<void> {
     this.frentes.delete(id)
   }
 
-  getRegistros(frenteId: string): Registro[] {
+  async getRegistros(frenteId: string): Promise<Registro[]> {
     return this.registros
       .filter((r) => r.frenteId === frenteId)
       .sort((a, b) => b.data - a.data)
   }
 
-  salvarRegistro(r: Registro): void {
+  async salvarRegistro(r: Registro): Promise<void> {
     this.registros.push(r)
   }
 }

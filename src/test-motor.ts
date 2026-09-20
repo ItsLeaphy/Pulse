@@ -81,18 +81,18 @@ console.log('--- Sinais individuais/agregados ---\n')
 const testes = ['darkline', 'darkline-dev', 'origens', 'projeto-fantasma', 'violino', 'escola', 'financas']
 
 for (const id of testes) {
-  const frente = storage.getFrente(id)!
-  const sinal = calcularSinalAgregado(id, storage)
+  const frente = (await storage.getFrente(id))!
+  const sinal = await calcularSinalAgregado(id, storage)
   console.log(`${frente.nome.padEnd(20)} → ${sinal}`)
 }
 
 console.log('\n--- Verificações esperadas ---\n')
 
-const sinalDarkline = calcularSinalAgregado('darkline', storage)
-const sinalDev = calcularSinalAgregado('darkline-dev', storage)
-const sinalOrigens = calcularSinalAgregado('origens', storage)
-const sinalFantasma = calcularSinalAgregado('projeto-fantasma', storage)
-const sinalFinancas = calcularSinalAgregado('financas', storage)
+const sinalDarkline = await calcularSinalAgregado('darkline', storage)
+const sinalDev = await calcularSinalAgregado('darkline-dev', storage)
+const sinalOrigens = await calcularSinalAgregado('origens', storage)
+const sinalFantasma = await calcularSinalAgregado('projeto-fantasma', storage)
+const sinalFinancas = await calcularSinalAgregado('financas', storage)
 
 console.log(
   sinalOrigens === 'no_ritmo'
@@ -126,10 +126,10 @@ console.log(
 
 console.log('\n--- Teste de registrarMovimento ---\n')
 
-let violino = storage.getFrente('violino')!
+let violino = (await storage.getFrente('violino'))!
 console.log('Antes:', new Date(violino.últimoMovimento!).toISOString())
 violino = registrarMovimento(violino)
-storage.salvarFrente(violino)
+await storage.salvarFrente(violino)
 console.log('Depois:', new Date(violino.últimoMovimento!).toISOString())
 console.log(
   Math.abs(violino.últimoMovimento! - agora) < 1000

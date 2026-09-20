@@ -55,22 +55,22 @@ function piorSinal(sinais: Sinal[]): Sinal {
  * é que negligência num filho nunca fique escondida atrás de
  * outros filhos saudáveis.
  */
-export function calcularSinalAgregado(
+export async function calcularSinalAgregado(
   frenteId: string,
   storage: StorageAdapter,
   agora: number = Date.now()
-): Sinal {
-  const frente = storage.getFrente(frenteId)
+): Promise<Sinal> {
+  const frente = await storage.getFrente(frenteId)
   if (!frente) throw new Error(`Frente ${frenteId} não encontrada`)
 
-  const filhos = storage.getFrentes().filter((f) => f.parentId === frenteId)
+  const filhos = (await storage.getFrentes()).filter((f) => f.parentId === frenteId)
 
   if (filhos.length === 0) {
     return calcularSinal(frente, agora)
   }
 
   const sinalPróprio = frente.tipo === 'domínio' ? null : calcularSinal(frente, agora)
-  const sinaisFilhos = filhos.map((f) => calcularSinalAgregado(f.id, storage, agora))
+  const sinaisFilhos = await Promise.all(filhos.map((f) => calcularSinalAgregado(f.id, storage, agora)))
 
   return piorSinal(sinalPróprio ? [sinalPróprio, ...sinaisFilhos] : sinaisFilhos)
 }

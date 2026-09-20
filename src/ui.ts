@@ -4,7 +4,7 @@ import { calcularSinalAgregado, registrarMovimento, registrarToque } from './sig
 import { novoId } from './id'
 
 // ============================================================
-// UI — FASE 3
+// UI — FASE 3 (+ suporte a storage assíncrono)
 // Casca funcional, sem identidade visual. Objetivo: dá pra usar
 // de verdade por alguns dias antes de qualquer decisão estética.
 // A Fase 4 troca a aparência daqui sem tocar em storage.ts/signal.ts.
@@ -25,20 +25,27 @@ let storageRef: StorageAdapter
 export function renderApp(storage: StorageAdapter): void {
   storageRef = storage
   root = document.getElementById('app')!
-  window.addEventListener('hashchange', rotear)
-  rotear()
+  window.addEventListener('hashchange', () => {
+    rotear().catch(mostrarErro)
+  })
+  rotear().catch(mostrarErro)
 }
 
-function rotear(): void {
+function mostrarErro(err: unknown): void {
+  console.error(err)
+  root.innerHTML = `<p style="color:#a12a2a">Erro: ${err instanceof Error ? err.message : String(err)}</p>`
+}
+
+async function rotear(): Promise<void> {
   const hash = window.location.hash.replace('#', '') || '/'
   const partes = hash.split('/').filter(Boolean)
 
   if (partes.length === 0) {
-    renderHome()
+    await renderHome()
   } else if (partes[0] === 'frente' && partes[1]) {
-    renderFrenteDetail(partes[1])
+    await renderFrenteDetail(partes[1])
   } else {
-    renderHome()
+    await renderHome()
   }
 }
 
@@ -48,10 +55,9 @@ function ir(hash: string): void {
 
 // ---------- HOME ----------
 
-function renderHome(): void {
-  const todasFrentes = storageRef.getFrentes()
-  const raízesPorÁrea = (área: Área) =>
-    todasFrentes.filter((f) => f.área === área && f.parentId === null)
+async function renderHome(): Promise<void> {
+  const todasFrentes = await storageRef.getFrentes()
+  const raízesPorÁrea = (área: Área) => todasFrentes.filter((f) => f.área === área && f.parentId === null)
 
   let html = `<h1>Pulse</h1>`
   html += `<p class="meta-row">O que está acontecendo com as coisas que fazem parte da minha vida.</p>`
@@ -65,7 +71,7 @@ function renderHome(): void {
     }
 
     for (const frente of raízes) {
-      const sinal = calcularSinalAgregado(frente.id, storageRef)
+      const sinal = await calcularSinalAgregado(frente.id, storageRef)
       const filhos = todasFrentes.filter((f) => f.parentId === frente.id)
       html += `
         <div class="frente-card" data-id="${frente.id}">
@@ -87,20 +93,21 @@ function renderHome(): void {
 
 // ---------- DETALHE DE FRENTE ----------
 
-function renderFrenteDetail(id: string): void {
-  const frente = storageRef.getFrente(id)
+async function renderFrenteDetail(id: string): Promise<void> {
+  const frente = await storageRef.getFrente(id)
   if (!frente) {
-    renderHome()
+    await renderHome()
     return
   }
 
   // abrir uma frente conta como toque, não como movimento real
-  storageRef.salvarFrente(registrarToque(frente))
+  await storageRef.salvarFrente(registrarToque(frente))
 
-  const sinal = calcularSinalAgregado(frente.id, storageRef)
-  const registros = storageRef.getRegistros(frente.id)
-  const filhos = storageRef.getFrentes().filter((f) => f.parentId === frente.id)
-  const pai = frente.parentId ? storageRef.getFrente(frente.parentId) : null
+  const sinal = await calcularSinalAgregado(frente.id, storageRef)
+  const registros = await storageRef.getRegistros(frente.id)
+  const todasFrentes = await storageRef.getFrentes()
+  const filhos = todasFrentes.filter((f) => f.parentId === frente.id)
+  const pai = frente.parentId ? await storageRef.getFrente(frente.parentId) : null
 
   let html = `<span class="voltar" id="voltar">← voltar</span>`
   if (pai) html += `<div class="meta-row">em ${escapeHtml(pai.nome)}</div>`
@@ -126,7 +133,7 @@ function renderFrenteDetail(id: string): void {
   if (filhos.length > 0) {
     html += `<h3>Sub-frentes</h3>`
     for (const filho of filhos) {
-      const sinalFilho = calcularSinalAgregado(filho.id, storageRef)
+      const sinalFilho = await calcularSinalAgregado(filho.id, storageRef)
       html += `
         <div class="frente-card" data-id="${filho.id}">
           <strong>${escapeHtml(filho.nome)}</strong>
@@ -167,9 +174,12 @@ function renderFrenteDetail(id: string): void {
 
   document.getElementById('opt-out')!.addEventListener('change', (e) => {
     const checked = (e.target as HTMLInputElement).checked
-    const atual = storageRef.getFrente(frente.id)!
-    storageRef.salvarFrente({ ...atual, optOutNegligência: checked })
-    renderFrenteDetail(frente.id)
+    void (async () => {
+      const atual = await storageRef.getFrente(frente.id)
+      if (!atual) return
+      await storageRef.salvarFrente({ ...atual, optOutNegligência: checked })
+      await renderFrenteDetail(frente.id)
+    })()
   })
 
   document.getElementById('form-registro')!.addEventListener('submit', (e) => {
@@ -178,19 +188,23 @@ function renderFrenteDetail(id: string): void {
     const contaComoMovimento = (document.getElementById('reg-conta') as HTMLInputElement).checked
     if (!texto) return
 
-    storageRef.salvarRegistro({
-      id: novoId(),
-      frenteId: frente.id,
-      data: Date.now(),
-      texto,
-      contaComoMovimento
-    })
+    void (async () => {
+      await storageRef.salvarRegistro({
+        id: novoId(),
+        frenteId: frente.id,
+        data: Date.now(),
+        texto,
+        contaComoMovimento
+      })
 
-    const atual = storageRef.getFrente(frente.id)!
-    const atualizada = contaComoMovimento ? registrarMovimento(atual) : registrarToque(atual)
-    storageRef.salvarFrente(atualizada)
+      const atual = await storageRef.getFrente(frente.id)
+      if (atual) {
+        const atualizada = contaComoMovimento ? registrarMovimento(atual) : registrarToque(atual)
+        await storageRef.salvarFrente(atualizada)
+      }
 
-    renderFrenteDetail(frente.id)
+      await renderFrenteDetail(frente.id)
+    })()
   })
 }
 
@@ -251,13 +265,15 @@ function ligarFormNovaFrente(parentId: string | null): void {
       optOutNegligência: false,
       criadaEm: agora
     }
-    storageRef.salvarFrente(frente)
 
-    if (parentId) {
-      renderFrenteDetail(parentId)
-    } else {
-      renderHome()
-    }
+    void (async () => {
+      await storageRef.salvarFrente(frente)
+      if (parentId) {
+        await renderFrenteDetail(parentId)
+      } else {
+        await renderHome()
+      }
+    })()
   })
 }
 
