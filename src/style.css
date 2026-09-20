@@ -1,0 +1,117 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+  line-height: 1.4;
+  color: #111;
+}
+
+h1, h2, h3 {
+  margin: 0 0 0.5rem;
+}
+
+.área-título {
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
+  color: #666;
+  margin-top: 2rem;
+}
+
+.frente-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  margin-bottom: 0.4rem;
+  cursor: pointer;
+  background: #fff;
+}
+
+.frente-card:hover {
+  background: #f7f7f7;
+}
+
+.sinal {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 3px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sinal-no_ritmo { background: #d7f2dd; color: #1e6b34; }
+.sinal-esfriando { background: #fdf1c7; color: #8a6d1a; }
+.sinal-fora_do_ritmo { background: #fbd8d8; color: #a12a2a; }
+.sinal-hibernando { background: #e6e6e6; color: #777; }
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px dashed #bbb;
+  border-radius: 4px;
+}
+
+label {
+  font-size: 0.85rem;
+  color: #444;
+}
+
+input, select, textarea, button {
+  font: inherit;
+  padding: 0.4rem;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+}
+
+button {
+  cursor: pointer;
+  background: #111;
+  color: #fff;
+  border: none;
+  padding: 0.5rem;
+}
+
+.voltar {
+  display: inline-block;
+  margin-bottom: 1rem;
+  cursor: pointer;
+  color: #444;
+  text-decoration: underline;
+}
+
+.registro {
+  border-bottom: 1px solid #eee;
+  padding: 0.5rem 0;
+}
+
+.registro-data {
+  font-size: 0.75rem;
+  color: #888;
+  font-family: ui-monospace, monospace;
+}
+
+.meta-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  color: #555;
+  margin: 0.5rem 0 1rem;
+}
+
+.vazio {
+  color: #999;
+  font-style: italic;
+  padding: 0.5rem 0;
+}
