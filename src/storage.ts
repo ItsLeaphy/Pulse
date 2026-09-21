@@ -15,7 +15,9 @@ export interface StorageAdapter {
   removerFrente(id: string): Promise<void>
 
   getRegistros(frenteId: string): Promise<Registro[]>
+  getRegistrosRecentes(limite: number): Promise<Registro[]>
   salvarRegistro(r: Registro): Promise<void>
+  removerRegistro(id: string): Promise<void>
 }
 
 const CHAVE_FRENTES = 'controle-pessoal:frentes'
@@ -66,10 +68,22 @@ export class LocalStorageAdapter implements StorageAdapter {
       .sort((a, b) => b.data - a.data)
   }
 
+  async getRegistrosRecentes(limite: number): Promise<Registro[]> {
+    return this.lerRegistros()
+      .sort((a, b) => b.data - a.data)
+      .slice(0, limite)
+  }
+
   async salvarRegistro(r: Registro): Promise<void> {
     const registros = this.lerRegistros()
-    registros.push(r)
+    const idx = registros.findIndex((x) => x.id === r.id)
+    if (idx >= 0) registros[idx] = r
+    else registros.push(r)
     this.escreverRegistros(registros)
+  }
+
+  async removerRegistro(id: string): Promise<void> {
+    this.escreverRegistros(this.lerRegistros().filter((r) => r.id !== id))
   }
 }
 
@@ -104,7 +118,17 @@ export class MemoryAdapter implements StorageAdapter {
       .sort((a, b) => b.data - a.data)
   }
 
+  async getRegistrosRecentes(limite: number): Promise<Registro[]> {
+    return [...this.registros].sort((a, b) => b.data - a.data).slice(0, limite)
+  }
+
   async salvarRegistro(r: Registro): Promise<void> {
-    this.registros.push(r)
+    const idx = this.registros.findIndex((x) => x.id === r.id)
+    if (idx >= 0) this.registros[idx] = r
+    else this.registros.push(r)
+  }
+
+  async removerRegistro(id: string): Promise<void> {
+    this.registros = this.registros.filter((r) => r.id !== id)
   }
 }

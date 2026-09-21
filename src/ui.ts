@@ -1,13 +1,13 @@
 import type { StorageAdapter } from './storage'
-import type { Área, Frente, TipoFrente } from './types'
+import type { Área, EstadoFrente, Frente, TipoFrente } from './types'
 import { calcularSinalAgregado, registrarMovimento, registrarToque } from './signal'
+import { excluirFrenteComFilhos } from './frente-ops'
 import { novoId } from './id'
 
 // ============================================================
-// UI — FASE 3 (+ suporte a storage assíncrono)
-// Casca funcional, sem identidade visual. Objetivo: dá pra usar
-// de verdade por alguns dias antes de qualquer decisão estética.
-// A Fase 4 troca a aparência daqui sem tocar em storage.ts/signal.ts.
+// UI — FASE 3 (+ storage assíncrono, feed de recentes, CRUD completo)
+// Casca funcional, sem identidade visual. A Fase 4 troca a
+// aparência daqui sem tocar em storage.ts/signal.ts/frente-ops.ts.
 // ============================================================
 
 const ÁREAS: Área[] = ['work', 'life', 'art']
@@ -18,9 +18,17 @@ const RÓTULO_SINAL: Record<string, string> = {
   fora_do_ritmo: 'fora do ritmo',
   hibernando: 'hibernando'
 }
+const RÓTULO_ESTADO: Record<EstadoFrente, string> = {
+  ativa: 'Ativa',
+  pausada_por_decisão: 'Pausada por decisão',
+  arquivada: 'Arquivada'
+}
 
 let root: HTMLElement
 let storageRef: StorageAdapter
+
+/** id do registro em edição inline no momento — null quando nenhum está aberto */
+let editandoRegistroId: string | null = null
 
 export function renderApp(storage: StorageAdapter): void {
   storageRef = storage
@@ -50,6 +58,7 @@ async function rotear(): Promise<void> {
 }
 
 function ir(hash: string): void {
+  editandoRegistroId = null
   window.location.hash = hash
 }
 
@@ -84,10 +93,26 @@ async function renderHome(): Promise<void> {
     }
   }
 
+  html += `<div class="área-título">MOVIMENTOS RECENTES</div>`
+  const recentes = await storageRef.getRegistrosRecentes(8)
+  if (recentes.length === 0) {
+    html += `<div class="vazio">Nenhum movimento registrado ainda.</div>`
+  }
+  for (const r of recentes) {
+    const frenteDoRegistro = todasFrentes.find((f) => f.id === r.frenteId)
+    const nomeFrente = frenteDoRegistro ? frenteDoRegistro.nome : '(frente removida)'
+    html += `
+      <div class="registro" data-id="${r.frenteId}" style="cursor:pointer">
+        <div class="registro-data">${formatarData(r.data)} · ${escapeHtml(nomeFrente)} ${r.contaComoMovimento ? '· movimento' : '· nota'}</div>
+        <div>${escapeHtml(r.texto)}</div>
+      </div>`
+  }
+
   html += renderFormNovaFrente(null)
 
   root.innerHTML = html
   ligarCliquesFrenteCard()
+  ligarCliquesRegistroRecente()
   ligarFormNovaFrente(null)
 }
 
@@ -117,7 +142,7 @@ async function renderFrenteDetail(id: string): Promise<void> {
     <div class="meta-row">
       <span class="sinal sinal-${sinal}">${RÓTULO_SINAL[sinal]}</span>
       <span>tipo: ${frente.tipo}</span>
-      <span>estado: ${frente.estado}</span>
+      <span>estado: ${RÓTULO_ESTADO[frente.estado]}</span>
       <span>cadência: ${frente.cadênciaEsperada}d</span>
       <span>último movimento: ${frente.últimoMovimento ? formatarData(frente.últimoMovimento) : 'nunca'}</span>
     </div>
@@ -128,6 +153,41 @@ async function renderFrenteDetail(id: string): Promise<void> {
       <input type="checkbox" id="opt-out" ${frente.optOutNegligência ? 'checked' : ''} />
       hibernando (não avisar sobre negligência)
     </label>
+  `
+
+  // ---- editar frente ----
+  html += `
+    <h3>Editar frente</h3>
+    <form id="form-editar-frente">
+      <label>Nome</label>
+      <input type="text" id="ef-nome" value="${escapeHtml(frente.nome)}" required />
+
+      <label>Área</label>
+      <select id="ef-área">
+        <option value="work" ${frente.área === 'work' ? 'selected' : ''}>Work</option>
+        <option value="life" ${frente.área === 'life' ? 'selected' : ''}>Life</option>
+        <option value="art" ${frente.área === 'art' ? 'selected' : ''}>Art</option>
+      </select>
+
+      <label>Tipo</label>
+      <select id="ef-tipo">
+        <option value="projeto" ${frente.tipo === 'projeto' ? 'selected' : ''}>Projeto</option>
+        <option value="prática" ${frente.tipo === 'prática' ? 'selected' : ''}>Prática</option>
+        <option value="domínio" ${frente.tipo === 'domínio' ? 'selected' : ''}>Domínio</option>
+      </select>
+
+      <label>Estado</label>
+      <select id="ef-estado">
+        <option value="ativa" ${frente.estado === 'ativa' ? 'selected' : ''}>Ativa</option>
+        <option value="pausada_por_decisão" ${frente.estado === 'pausada_por_decisão' ? 'selected' : ''}>Pausada por decisão</option>
+        <option value="arquivada" ${frente.estado === 'arquivada' ? 'selected' : ''}>Arquivada</option>
+      </select>
+
+      <label>Cadência esperada (dias entre movimentos)</label>
+      <input type="number" id="ef-cadência" value="${frente.cadênciaEsperada}" min="1" required />
+
+      <button type="submit">Salvar alterações</button>
+    </form>
   `
 
   if (filhos.length > 0) {
@@ -159,12 +219,37 @@ async function renderFrenteDetail(id: string): Promise<void> {
     html += `<div class="vazio">Nenhum registro ainda.</div>`
   }
   for (const r of registros) {
-    html += `
-      <div class="registro">
-        <div class="registro-data">${formatarData(r.data)} ${r.contaComoMovimento ? '· movimento' : '· nota'}</div>
-        <div>${escapeHtml(r.texto)}</div>
-      </div>`
+    if (r.id === editandoRegistroId) {
+      html += `
+        <div class="registro">
+          <form class="form-editar-registro" data-id="${r.id}">
+            <textarea class="er-texto" rows="2">${escapeHtml(r.texto)}</textarea>
+            <label><input type="checkbox" class="er-conta" ${r.contaComoMovimento ? 'checked' : ''} /> conta como movimento</label>
+            <button type="submit">Salvar</button>
+            <button type="button" class="er-cancelar">Cancelar</button>
+          </form>
+        </div>`
+    } else {
+      html += `
+        <div class="registro">
+          <div class="registro-data">${formatarData(r.data)} ${r.contaComoMovimento ? '· movimento' : '· nota'}</div>
+          <div>${escapeHtml(r.texto)}</div>
+          <div class="meta-row">
+            <span class="acao-editar-registro" data-id="${r.id}" style="cursor:pointer;text-decoration:underline">editar</span>
+            <span class="acao-excluir-registro" data-id="${r.id}" style="cursor:pointer;text-decoration:underline">excluir</span>
+          </div>
+        </div>`
+    }
   }
+
+  // ---- excluir frente (por último, é destrutivo) ----
+  const avisoFilhos = filhos.length > 0 ? ` e ${filhos.length} sub-frente(s)` : ''
+  html += `
+    <h3>Zona de risco</h3>
+    <button id="btn-excluir-frente" type="button" style="background:#a12a2a">
+      Excluir "${escapeHtml(frente.nome)}"${avisoFilhos}
+    </button>
+  `
 
   root.innerHTML = html
 
@@ -178,6 +263,23 @@ async function renderFrenteDetail(id: string): Promise<void> {
       const atual = await storageRef.getFrente(frente.id)
       if (!atual) return
       await storageRef.salvarFrente({ ...atual, optOutNegligência: checked })
+      await renderFrenteDetail(frente.id)
+    })()
+  })
+
+  document.getElementById('form-editar-frente')!.addEventListener('submit', (e) => {
+    e.preventDefault()
+    const nome = (document.getElementById('ef-nome') as HTMLInputElement).value.trim()
+    const área = (document.getElementById('ef-área') as HTMLSelectElement).value as Área
+    const tipo = (document.getElementById('ef-tipo') as HTMLSelectElement).value as TipoFrente
+    const estado = (document.getElementById('ef-estado') as HTMLSelectElement).value as EstadoFrente
+    const cadênciaEsperada = Number((document.getElementById('ef-cadência') as HTMLInputElement).value)
+    if (!nome) return
+
+    void (async () => {
+      const atual = await storageRef.getFrente(frente.id)
+      if (!atual) return
+      await storageRef.salvarFrente({ ...atual, nome, área, tipo, estado, cadênciaEsperada })
       await renderFrenteDetail(frente.id)
     })()
   })
@@ -204,6 +306,62 @@ async function renderFrenteDetail(id: string): Promise<void> {
       }
 
       await renderFrenteDetail(frente.id)
+    })()
+  })
+
+  // ---- ações de registro: editar / excluir ----
+  document.querySelectorAll<HTMLElement>('.acao-editar-registro').forEach((el) => {
+    el.addEventListener('click', () => {
+      editandoRegistroId = el.dataset.id!
+      void renderFrenteDetail(frente.id)
+    })
+  })
+
+  document.querySelectorAll<HTMLElement>('.acao-excluir-registro').forEach((el) => {
+    el.addEventListener('click', () => {
+      if (!confirm('Excluir este registro? Não dá pra desfazer.')) return
+      void (async () => {
+        await storageRef.removerRegistro(el.dataset.id!)
+        await renderFrenteDetail(frente.id)
+      })()
+    })
+  })
+
+  document.querySelectorAll<HTMLFormElement>('.form-editar-registro').forEach((form) => {
+    form.addEventListener('submit', (e) => {
+      e.preventDefault()
+      const idRegistro = form.dataset.id!
+      const texto = (form.querySelector('.er-texto') as HTMLTextAreaElement).value.trim()
+      const contaComoMovimento = (form.querySelector('.er-conta') as HTMLInputElement).checked
+      if (!texto) return
+
+      void (async () => {
+        const todos = await storageRef.getRegistros(frente.id)
+        const alvo = todos.find((r) => r.id === idRegistro)
+        if (!alvo) return
+        await storageRef.salvarRegistro({ ...alvo, texto, contaComoMovimento })
+        editandoRegistroId = null
+        await renderFrenteDetail(frente.id)
+      })()
+    })
+
+    form.querySelector('.er-cancelar')!.addEventListener('click', () => {
+      editandoRegistroId = null
+      void renderFrenteDetail(frente.id)
+    })
+  })
+
+  // ---- excluir frente ----
+  document.getElementById('btn-excluir-frente')!.addEventListener('click', () => {
+    const aviso =
+      filhos.length > 0
+        ? `Isso vai apagar "${frente.nome}", suas ${filhos.length} sub-frente(s) e todos os registros associados. Não dá pra desfazer. Confirma?`
+        : `Isso vai apagar "${frente.nome}" e todos os seus registros. Não dá pra desfazer. Confirma?`
+    if (!confirm(aviso)) return
+
+    void (async () => {
+      await excluirFrenteComFilhos(frente.id, storageRef)
+      ir(pai ? `/frente/${pai.id}` : '/')
     })()
   })
 }
@@ -283,6 +441,15 @@ function ligarCliquesFrenteCard(): void {
   document.querySelectorAll<HTMLElement>('.frente-card').forEach((card) => {
     card.addEventListener('click', () => {
       const id = card.dataset.id!
+      ir(`/frente/${id}`)
+    })
+  })
+}
+
+function ligarCliquesRegistroRecente(): void {
+  document.querySelectorAll<HTMLElement>('.registro[data-id]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.id!
       ir(`/frente/${id}`)
     })
   })

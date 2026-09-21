@@ -123,8 +123,23 @@ export class SupabaseAdapter implements StorageAdapter {
     return (data as RegistroRow[]).map(rowParaRegistro)
   }
 
+  async getRegistrosRecentes(limite: number): Promise<Registro[]> {
+    const { data, error } = await this.client
+      .from('registros')
+      .select('*')
+      .order('data', { ascending: false })
+      .limit(limite)
+    if (error) throw error
+    return (data as RegistroRow[]).map(rowParaRegistro)
+  }
+
   async salvarRegistro(r: Registro): Promise<void> {
     const { error } = await this.client.from('registros').upsert(registroParaRow(r))
+    if (error) throw error
+  }
+
+  async removerRegistro(id: string): Promise<void> {
+    const { error } = await this.client.from('registros').delete().eq('id', id)
     if (error) throw error
   }
 }
