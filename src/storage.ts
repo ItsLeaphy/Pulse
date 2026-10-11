@@ -1,0 +1,183 @@
+import type { Frente, Registro, EventoEstrutural } from './types'
+
+// ============================================================
+// STORAGE ADAPTER
+// Nenhuma outra parte do código deve chamar localStorage
+// diretamente. Tudo passa por essa interface — trocar para um
+// backend real no futuro é escrever uma nova classe, não
+// reescrever a lógica de negócio.
+// ============================================================
+
+export interface StorageAdapter {
+  getFrentes(): Promise<Frente[]>
+  getFrente(id: string): Promise<Frente | undefined>
+  salvarFrente(f: Frente): Promise<void>
+  removerFrente(id: string): Promise<void>
+
+  getRegistros(frenteId: string): Promise<Registro[]>
+  getRegistrosRecentes(limite: number): Promise<Registro[]>
+  salvarRegistro(r: Registro): Promise<void>
+  removerRegistro(id: string): Promise<void>
+
+  getEventosEstruturais(frenteId: string): Promise<EventoEstrutural[]>
+  salvarEventoEstrutural(e: EventoEstrutural): Promise<void>
+  removerEventoEstrutural(id: string): Promise<void>
+}
+
+const CHAVE_FRENTES = 'controle-pessoal:frentes'
+const CHAVE_REGISTROS = 'controle-pessoal:registros'
+const CHAVE_EVENTOS = 'controle-pessoal:eventos-estruturais'
+
+export class LocalStorageAdapter implements StorageAdapter {
+  private lerFrentes(): Frente[] {
+    const raw = localStorage.getItem(CHAVE_FRENTES)
+    return raw ? (JSON.parse(raw) as Frente[]) : []
+  }
+
+  private escreverFrentes(frentes: Frente[]): void {
+    localStorage.setItem(CHAVE_FRENTES, JSON.stringify(frentes))
+  }
+
+  private lerRegistros(): Registro[] {
+    const raw = localStorage.getItem(CHAVE_REGISTROS)
+    return raw ? (JSON.parse(raw) as Registro[]) : []
+  }
+
+  private escreverRegistros(registros: Registro[]): void {
+    localStorage.setItem(CHAVE_REGISTROS, JSON.stringify(registros))
+  }
+
+  private lerEventos(): EventoEstrutural[] {
+    const raw = localStorage.getItem(CHAVE_EVENTOS)
+    return raw ? (JSON.parse(raw) as EventoEstrutural[]) : []
+  }
+
+  private escreverEventos(eventos: EventoEstrutural[]): void {
+    localStorage.setItem(CHAVE_EVENTOS, JSON.stringify(eventos))
+  }
+
+  async getFrentes(): Promise<Frente[]> {
+    return this.lerFrentes()
+  }
+
+  async getFrente(id: string): Promise<Frente | undefined> {
+    return this.lerFrentes().find((f) => f.id === id)
+  }
+
+  async salvarFrente(f: Frente): Promise<void> {
+    const frentes = this.lerFrentes()
+    const idx = frentes.findIndex((x) => x.id === f.id)
+    if (idx >= 0) frentes[idx] = f
+    else frentes.push(f)
+    this.escreverFrentes(frentes)
+  }
+
+  async removerFrente(id: string): Promise<void> {
+    this.escreverFrentes(this.lerFrentes().filter((f) => f.id !== id))
+  }
+
+  async getRegistros(frenteId: string): Promise<Registro[]> {
+    return this.lerRegistros()
+      .filter((r) => r.frenteId === frenteId)
+      .sort((a, b) => b.data - a.data)
+  }
+
+  async getRegistrosRecentes(limite: number): Promise<Registro[]> {
+    return this.lerRegistros()
+      .sort((a, b) => b.data - a.data)
+      .slice(0, limite)
+  }
+
+  async salvarRegistro(r: Registro): Promise<void> {
+    const registros = this.lerRegistros()
+    const idx = registros.findIndex((x) => x.id === r.id)
+    if (idx >= 0) registros[idx] = r
+    else registros.push(r)
+    this.escreverRegistros(registros)
+  }
+
+  async removerRegistro(id: string): Promise<void> {
+    this.escreverRegistros(this.lerRegistros().filter((r) => r.id !== id))
+  }
+
+  async getEventosEstruturais(frenteId: string): Promise<EventoEstrutural[]> {
+    return this.lerEventos()
+      .filter((e) => e.frenteId === frenteId)
+      .sort((a, b) => b.criadoEm - a.criadoEm)
+  }
+
+  async salvarEventoEstrutural(e: EventoEstrutural): Promise<void> {
+    const eventos = this.lerEventos()
+    const idx = eventos.findIndex((x) => x.id === e.id)
+    if (idx >= 0) eventos[idx] = e
+    else eventos.push(e)
+    this.escreverEventos(eventos)
+  }
+
+  async removerEventoEstrutural(id: string): Promise<void> {
+    this.escreverEventos(this.lerEventos().filter((e) => e.id !== id))
+  }
+}
+
+/**
+ * Implementação em memória — útil para testes (Node não tem
+ * localStorage) e, no futuro, como base pra um MemoryAdapter
+ * de desenvolvimento sem persistência.
+ */
+export class MemoryAdapter implements StorageAdapter {
+  private frentes = new Map<string, Frente>()
+  private registros: Registro[] = []
+  private eventos: EventoEstrutural[] = []
+
+  async getFrentes(): Promise<Frente[]> {
+    return [...this.frentes.values()]
+  }
+
+  async getFrente(id: string): Promise<Frente | undefined> {
+    return this.frentes.get(id)
+  }
+
+  async salvarFrente(f: Frente): Promise<void> {
+    this.frentes.set(f.id, f)
+  }
+
+  async removerFrente(id: string): Promise<void> {
+    this.frentes.delete(id)
+  }
+
+  async getRegistros(frenteId: string): Promise<Registro[]> {
+    return this.registros
+      .filter((r) => r.frenteId === frenteId)
+      .sort((a, b) => b.data - a.data)
+  }
+
+  async getRegistrosRecentes(limite: number): Promise<Registro[]> {
+    return [...this.registros].sort((a, b) => b.data - a.data).slice(0, limite)
+  }
+
+  async salvarRegistro(r: Registro): Promise<void> {
+    const idx = this.registros.findIndex((x) => x.id === r.id)
+    if (idx >= 0) this.registros[idx] = r
+    else this.registros.push(r)
+  }
+
+  async removerRegistro(id: string): Promise<void> {
+    this.registros = this.registros.filter((r) => r.id !== id)
+  }
+
+  async getEventosEstruturais(frenteId: string): Promise<EventoEstrutural[]> {
+    return this.eventos
+      .filter((e) => e.frenteId === frenteId)
+      .sort((a, b) => b.criadoEm - a.criadoEm)
+  }
+
+  async salvarEventoEstrutural(e: EventoEstrutural): Promise<void> {
+    const idx = this.eventos.findIndex((x) => x.id === e.id)
+    if (idx >= 0) this.eventos[idx] = e
+    else this.eventos.push(e)
+  }
+
+  async removerEventoEstrutural(id: string): Promise<void> {
+    this.eventos = this.eventos.filter((e) => e.id !== id)
+  }
+}
