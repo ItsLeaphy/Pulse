@@ -116,7 +116,24 @@ export function extrairDetalhes(err: unknown): DetalhesErro {
 }
 
 /** Códigos Postgres/PostgREST que indicam banco incompatível com o app. */
-const CÓDIGOS_SCHEMA = new Set(['23502', '23514', '42703', '42P01', 'PGRST204', 'PGRST205', 'PGRST200'])
+const CÓDIGOS_SCHEMA = new Set([
+  '23502',
+  '23514',
+  '42703',
+  '42P01',
+  'PGRST204',
+  'PGRST205',
+  'PGRST200',
+  // função RPC inexistente: a migration 005 (operações atômicas) não foi aplicada
+  'PGRST202',
+  '42883'
+])
+
+/**
+ * Erros definitivos das operações atômicas (migration 005): não existe,
+ * conflito de edição, dados inválidos. Repetir a MESMA chamada não ajuda.
+ */
+const CÓDIGOS_DEFINITIVOS = new Set(['PU404', 'PU409', 'PU422'])
 
 export function indicaSchemaIncompatível(d: DetalhesErro): boolean {
   return d.código !== undefined && CÓDIGOS_SCHEMA.has(d.código)
@@ -149,7 +166,8 @@ export function redigirSegredos(texto: string): string {
 export function normalizarErro(err: unknown, operação: string, podeRepetir = true): ErroPulse {
   if (err instanceof ErroPulse) return err
   const d = extrairDetalhes(err)
-  return new ErroPulse(operação, d, podeRepetir)
+  const definitivo = d.código !== undefined && CÓDIGOS_DEFINITIVOS.has(d.código)
+  return new ErroPulse(operação, d, podeRepetir && !definitivo)
 }
 
 /**
@@ -173,7 +191,7 @@ export function mensagemParaUsuário(err: unknown, operaçãoPadrão = 'concluir
 
 function descreverMotivo(d: DetalhesErro): string {
   if (indicaSchemaIncompatível(d)) {
-    return 'O banco de dados parece desatualizado em relação a esta versão do app. Aplique as migrações pendentes (veja PULSE_HANDOFF.md).'
+    return 'O banco de dados parece desatualizado em relação a esta versão do app. Aplique as migrações pendentes, incluindo a 005 (veja PULSE_HANDOFF.md).'
   }
   if (d.código === '42501' || /row-level security|permission denied/i.test(d.mensagem)) {
     return 'Sem permissão para essa operação. Entre novamente na sua conta.'

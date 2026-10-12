@@ -11,11 +11,15 @@ import {
 import { moverFrente } from './hierarquia'
 import { exportarPulse, importarPulse } from './portabilidade'
 import { ErroParcial, ErroValidação } from './erros'
+import type { Registro, EventoEstrutural } from './types'
 import type { Frente } from './types'
 
 // ============================================================
 // TESTE: consistência de operações compostas sob falha injetada.
-// Distingue: não iniciada / concluída / parcial (com `completar`).
+// As operações de frente/registro são ATÔMICAS (uma chamada de storage):
+// se a chamada falha, NADA muda (operação "não iniciada"); se repetida,
+// aplica uma vez. Só a IMPORTAÇÃO continua podendo ficar parcial (com
+// `completar`) — está fora do escopo da atomicidade.
 // Rode com: npm run test:consistencia
 // ============================================================
 
@@ -54,6 +58,12 @@ class Falhável implements StorageAdapter {
   salvarEventoEstrutural = (e: Parameters<StorageAdapter['salvarEventoEstrutural']>[0]) =>
     this.passar('salvarEventoEstrutural', () => this.base.salvarEventoEstrutural(e))
   removerEventoEstrutural = (id: string) => this.passar('removerEventoEstrutural', () => this.base.removerEventoEstrutural(id))
+  salvarFrenteComEventos = (f: Frente, e: EventoEstrutural[], esp: Frente | null) =>
+    this.passar('salvarFrenteComEventos', () => this.base.salvarFrenteComEventos(f, e, esp))
+  salvarRegistroComCache = (r: Registro, esp: Registro | null) =>
+    this.passar('salvarRegistroComCache', () => this.base.salvarRegistroComCache(r, esp))
+  removerRegistroComCache = (id: string) => this.passar('removerRegistroComCache', () => this.base.removerRegistroComCache(id))
+  removerFrenteEmCascata = (id: string) => this.passar('removerFrenteEmCascata', () => this.base.removerFrenteEmCascata(id))
 }
 
 function novo(): { s: Falhável; mem: MemoryAdapter } {
@@ -90,39 +100,19 @@ async function captura(fn: () => Promise<unknown>): Promise<unknown> {
   }
 }
 
-// ============ criarFrente: frente grava, evento falha → parcial; retry não duplica ============
+// ============ criarFrente: atômica ============
 console.log('\n— criarFrente')
 {
   const { s, mem } = novo()
-  s.falhar = { método: 'salvarEventoEstrutural', n: 1 }
+  s.falhar = { método: 'salvarFrenteComEventos', n: 1 }
   const erro = await captura(() => criarFrente(s, base('f1')))
-  check(erro instanceof ErroParcial, 'evento de criação falha → ErroParcial (não "falhou tudo")')
-  check((await mem.getFrente('f1')) !== undefined, 'a frente FOI gravada')
-  check((await mem.getEventosEstruturais('f1')).length === 0, 'o evento ainda não existe')
-  check(Boolean((erro as ErroParcial).completar), 'ErroParcial traz completar')
-
-  // retry pelo mesmo caminho (UI repete criarFrente com o mesmo id)
+  check(erro !== null && !(erro instanceof ErroParcial), 'falha na operação atômica → erro TOTAL (não existe mais "parcial")')
+  check((await mem.getFrentes()).length === 0 && (await mem.getTodosEventosEstruturais()).length === 0, 'estado: operação NÃO iniciada (nem frente nem evento)')
   await criarFrente(s, base('f1'))
-  check((await mem.getFrentes()).length === 1, 'retry com o mesmo id: continua 1 frente')
+  check((await mem.getFrentes()).length === 1, 'retry cria a frente')
   check((await mem.getEventosEstruturais('f1')).filter((e) => e.tipo === 'criação').length === 1, 'retry: exatamente 1 evento de criação')
   await criarFrente(s, base('f1'))
-  check((await mem.getEventosEstruturais('f1')).length === 1, 'repetir de novo é idempotente (continua 1 evento)')
-}
-{
-  const { s, mem } = novo()
-  s.falhar = { método: 'salvarEventoEstrutural', n: 1 }
-  const erro = (await captura(() => criarFrente(s, base('f2')))) as ErroParcial
-  await erro.completar!()
-  check((await mem.getEventosEstruturais('f2')).length === 1, 'completar grava só o evento que faltava')
-  await erro.completar!()
-  check((await mem.getEventosEstruturais('f2')).length === 1, 'completar repetido não duplica (mesmo id de evento)')
-}
-{
-  const { s, mem } = novo()
-  s.falhar = { método: 'salvarFrente', n: 1 }
-  const erro = await captura(() => criarFrente(s, base('f3')))
-  check(erro !== null && !(erro instanceof ErroParcial), 'falha na 1ª gravação: erro total, nada gravado')
-  check((await mem.getFrentes()).length === 0 && (await mem.getTodosEventosEstruturais()).length === 0, 'estado: operação não iniciada (zero resíduos)')
+  check((await mem.getFrentes()).length === 1 && (await mem.getEventosEstruturais('f1')).length === 1, 'repetir de novo é idempotente (1 frente, 1 evento)')
 }
 {
   const { s } = novo()
@@ -130,57 +120,58 @@ console.log('\n— criarFrente')
   check((await captura(() => criarFrente(s, base('f5', { cadênciaEsperada: Number('abc') })))) instanceof ErroValidação, 'cadência NaN → ErroValidação')
   check((await captura(() => criarFrente(s, base('f6', { cadênciaEsperada: 0 })))) instanceof ErroValidação, 'cadência 0 → ErroValidação')
   check((await captura(() => criarFrente(s, base('f7', { parentId: 'inexistente' })))) instanceof ErroValidação, 'pai inexistente → ErroValidação')
+  check(!s.chamadas.salvarFrenteComEventos, 'validação falha antes de qualquer gravação')
 }
 
-// ============ criarRegistro ============
-console.log('\n— criarRegistro')
+// ============ registros ============
+console.log('\n— registros')
 {
   const { s, mem } = novo()
   await criarFrente(s, base('r1'))
-  s.falhar = { método: 'salvarFrente', n: (s.chamadas.salvarFrente ?? 0) + 1 } // falha só no recálculo do cache
+  s.falhar = { método: 'salvarRegistroComCache', n: 1 }
   const dados = { id: 'reg-1', criadoEm: agora, frenteId: 'r1', data: agora - DIA, texto: 'x', contaComoMovimento: true }
   const erro = await captura(() => criarRegistro(s, dados))
-  check(erro instanceof ErroParcial, 'recálculo do cache falha → ErroParcial')
-  check((await mem.getRegistros('r1')).length === 1, 'o registro (fonte de verdade) FOI gravado')
-  check((await mem.getFrente('r1'))?.últimoMovimento === null, 'cache ainda desatualizado')
-  await (erro as ErroParcial).completar!()
-  check((await mem.getFrente('r1'))?.últimoMovimento === agora - DIA, 'completar corrige o cache a partir dos registros')
+  check(erro !== null && !(erro instanceof ErroParcial), 'falha ao criar registro → erro total')
+  check((await mem.getRegistros('r1')).length === 0 && (await mem.getFrente('r1'))?.últimoMovimento === null, 'nem o registro nem o cache mudaram')
   await criarRegistro(s, dados)
-  check((await mem.getRegistros('r1')).length === 1, 'retry com o mesmo id: continua 1 registro')
+  await criarRegistro(s, dados)
+  check((await mem.getRegistros('r1')).length === 1, 'retry (2×) com o mesmo id: 1 registro')
+  check((await mem.getFrente('r1'))?.últimoMovimento === agora - DIA, 'cache correto')
 }
 {
   const { s, mem } = novo()
   await criarFrente(s, base('r2'))
   const r = await criarRegistro(s, { frenteId: 'r2', data: agora - 3 * DIA, texto: 'a', contaComoMovimento: true })
-  // editar/excluir com a frente conhecida NÃO varre todas as frentes
   s.chamadas = {}
   await editarRegistro(s, r.id, { texto: 'b' }, 'r2')
   check((s.chamadas.getFrentes ?? 0) === 0 && (s.chamadas.getTodosRegistros ?? 0) === 0, 'editarRegistro com frente conhecida: sem varredura global')
   s.chamadas = {}
   await excluirRegistro(s, r.id, 'r2')
-  check((s.chamadas.getFrentes ?? 0) === 0 && (s.chamadas.getTodosRegistros ?? 0) === 0, 'excluirRegistro com frente conhecida: sem varredura global')
+  const leituras = Object.keys(s.chamadas).filter((m) => m.startsWith('get'))
+  check(leituras.length === 0, 'excluirRegistro: NENHUMA leitura (o storage resolve a frente)')
   check((await mem.getFrente('r2'))?.últimoMovimento === null, 'cache recalculado após excluir o único movimento')
-  // sem a dica: uma leitura em lote, não uma por frente
+
   const r2 = await criarRegistro(s, { frenteId: 'r2', data: agora, texto: 'c', contaComoMovimento: true })
-  s.chamadas = {}
+  s.falhar = { método: 'removerRegistroComCache', n: (s.chamadas.removerRegistroComCache ?? 0) + 1 }
+  const erro = await captura(() => excluirRegistro(s, r2.id))
+  check(erro !== null && (await mem.getRegistros('r2')).length === 1 && (await mem.getFrente('r2'))?.últimoMovimento === agora, 'falha ao excluir: registro e cache intactos')
   await excluirRegistro(s, r2.id)
-  check((s.chamadas.getRegistros ?? 0) <= 1 && (s.chamadas.getTodosRegistros ?? 0) === 1, 'sem dica: 1 leitura em lote (antes: 1 por frente)')
+  check((await mem.getRegistros('r2')).length === 0 && (await mem.getFrente('r2'))?.últimoMovimento === null, 'retry exclui e recalcula')
 }
 
 // ============ mudar* ============
-console.log('\n— mudarCondição (estado salvo, evento falha)')
+console.log('\n— mudarCondição')
 {
   const { s, mem } = novo()
   await criarFrente(s, base('c1'))
-  s.falhar = { método: 'salvarEventoEstrutural', n: (s.chamadas.salvarEventoEstrutural ?? 0) + 1 }
+  s.falhar = { método: 'salvarFrenteComEventos', n: (s.chamadas.salvarFrenteComEventos ?? 0) + 1 }
   const erro = await captura(() => mudarCondição(s, 'c1', 'bloqueada', agora))
-  check(erro instanceof ErroParcial, 'evento falha → ErroParcial')
-  check((await mem.getFrente('c1'))?.condição === 'bloqueada', 'a mudança de condição FOI salva')
-  await (erro as ErroParcial).completar!()
-  await (erro as ErroParcial).completar!()
+  check(erro !== null && !(erro instanceof ErroParcial), 'falha → erro total')
+  check((await mem.getFrente('c1'))?.condição === 'normal' && (await mem.getEventosEstruturais('c1')).length === 1, 'condição NÃO mudou e nenhum evento foi gravado')
+  await mudarCondição(s, 'c1', 'bloqueada', agora)
+  await mudarCondição(s, 'c1', 'bloqueada', agora)
   const evs = (await mem.getEventosEstruturais('c1')).filter((e) => e.tipo === 'condição_mudou')
-  check(evs.length === 1, 'completar (2×) deixa exatamente 1 evento de condição')
-  check((await mudarCondição(s, 'c1', 'bloqueada')).condição === 'bloqueada' && (await mem.getEventosEstruturais('c1')).filter((e) => e.tipo === 'condição_mudou').length === 1, 'repetir a mesma mudança não gera evento extra')
+  check((await mem.getFrente('c1'))?.condição === 'bloqueada' && evs.length === 1, 'retry aplica 1 vez; repetir a mesma mudança não gera evento extra')
 }
 
 // ============ editarFrente ============
@@ -198,43 +189,31 @@ console.log('\n— editarFrente')
   check(f.condição === 'normal', 'condição enviada para frente não-ativa é ignorada (fica normal), sem erro')
   check((await mem.getEventosEstruturais('e1')).length === antes, 'nenhum evento espúrio por edição de nome')
 
-  // ciclo + condição + cadência de uma vez: UMA gravação da linha
   const { s: s2, mem: m2 } = novo()
   await criarFrente(s2, base('e2', { condição: 'bloqueada' }))
   s2.chamadas = {}
   await editarFrente(s2, 'e2', { nome: 'e2', área: 'art', tipo: 'prática', cicloVida: 'arquivada', condição: 'pausada', cadênciaEsperada: 14, contextoFoco: null, contextoBloqueio: null }, agora)
-  check((s2.chamadas.salvarFrente ?? 0) === 1, 'edição composta usa 1 única gravação da frente')
-  const fe = (await m2.getFrente('e2'))!
-  check(fe.cicloVida === 'arquivada' && fe.condição === 'normal' && fe.cadênciaEsperada === 14 && fe.área === 'art' && fe.tipo === 'prática', 'estado final coerente com as invariantes')
+  check((s2.chamadas.salvarFrenteComEventos ?? 0) === 1 && !s2.chamadas.salvarFrente && !s2.chamadas.salvarEventoEstrutural, 'edição composta usa 1 única operação atômica')
   const tipos = (await m2.getEventosEstruturais('e2')).map((e) => `${e.tipo}:${e.valorAnterior}>${e.valorNovo}`).sort()
-  check(
-    tipos.includes('ciclo_vida_mudou:ativa>arquivada') && tipos.includes('condição_mudou:bloqueada>normal') && tipos.includes('cadência_mudou:7>14'),
-    'eventos: ciclo, condição (→normal) e cadência'
-  )
+  check(tipos.includes('ciclo_vida_mudou:ativa>arquivada') && tipos.includes('condição_mudou:bloqueada>normal') && tipos.includes('cadência_mudou:7>14'), 'eventos: ciclo, condição (→normal) e cadência')
 
-  // reativar com condição escolhida
   await editarFrente(s2, 'e2', { nome: 'e2', área: 'art', tipo: 'prática', cicloVida: 'ativa', condição: 'aguardando', cadênciaEsperada: 14, contextoFoco: null, contextoBloqueio: null }, agora + 1)
   check((await m2.getFrente('e2'))?.condição === 'aguardando', 'reativar já com condição "aguardando" funciona')
-
-  // sem mudança = sem gravação
   s2.chamadas = {}
   await editarFrente(s2, 'e2', { nome: 'e2', área: 'art', tipo: 'prática', cicloVida: 'ativa', condição: 'aguardando', cadênciaEsperada: 14, contextoFoco: null, contextoBloqueio: null }, agora + 2)
-  check((s2.chamadas.salvarFrente ?? 0) === 0, 'formulário sem alterações não grava nada')
-
-  // validação
+  check((s2.chamadas.salvarFrenteComEventos ?? 0) === 0, 'formulário sem alterações não grava nada')
   check((await captura(() => editarFrente(s2, 'e2', { nome: '', área: 'art', tipo: 'prática', cicloVida: 'ativa', condição: 'normal', cadênciaEsperada: 14, contextoFoco: null, contextoBloqueio: null }))) instanceof ErroValidação, 'nome vazio → ErroValidação')
   check((await captura(() => editarFrente(s2, 'e2', { nome: 'x', área: 'art', tipo: 'prática', cicloVida: 'ativa', condição: 'normal', cadênciaEsperada: -3, contextoFoco: null, contextoBloqueio: null }))) instanceof ErroValidação, 'cadência negativa → ErroValidação')
 
-  // evento falha depois da gravação
+  // falha na operação atômica: nem a frente nem os eventos
   const { s: s3, mem: m3 } = novo()
   await criarFrente(s3, base('e3'))
-  s3.falhar = { método: 'salvarEventoEstrutural', n: (s3.chamadas.salvarEventoEstrutural ?? 0) + 1 }
+  s3.falhar = { método: 'salvarFrenteComEventos', n: (s3.chamadas.salvarFrenteComEventos ?? 0) + 1 }
   const erro = await captura(() => editarFrente(s3, 'e3', { nome: 'e3', área: 'work', tipo: 'projeto', cicloVida: 'ativa', condição: 'pausada', cadênciaEsperada: 30, contextoFoco: null, contextoBloqueio: null }, agora))
-  check(erro instanceof ErroParcial, 'evento falha na edição → ErroParcial')
-  check((await m3.getFrente('e3'))?.condição === 'pausada' && (await m3.getFrente('e3'))?.cadênciaEsperada === 30, 'alterações da frente foram salvas')
-  await (erro as ErroParcial).completar!()
-  const evs = (await m3.getEventosEstruturais('e3')).filter((e) => e.tipo !== 'criação')
-  check(evs.length === 2, 'completar grava os 2 eventos pendentes (condição, cadência), sem duplicar')
+  check(erro !== null && !(erro instanceof ErroParcial), 'falha → erro total')
+  check((await m3.getFrente('e3'))?.condição === 'normal' && (await m3.getFrente('e3'))?.cadênciaEsperada === 7 && (await m3.getEventosEstruturais('e3')).length === 1, 'NADA foi salvo: frente intacta, nenhum evento')
+  await editarFrente(s3, 'e3', { nome: 'e3', área: 'work', tipo: 'projeto', cicloVida: 'ativa', condição: 'pausada', cadênciaEsperada: 30, contextoFoco: null, contextoBloqueio: null }, agora)
+  check((await m3.getEventosEstruturais('e3')).filter((e) => e.tipo !== 'criação').length === 2, 'retry grava os 2 eventos (condição, cadência), sem duplicar')
 }
 
 // ============ moverFrente ============
@@ -243,11 +222,11 @@ console.log('\n— moverFrente')
   const { s, mem } = novo()
   await criarFrente(s, base('m-pai', { tipo: 'domínio', cadênciaEsperada: null }))
   await criarFrente(s, base('m-filha'))
-  s.falhar = { método: 'salvarEventoEstrutural', n: (s.chamadas.salvarEventoEstrutural ?? 0) + 1 }
+  s.falhar = { método: 'salvarFrenteComEventos', n: (s.chamadas.salvarFrenteComEventos ?? 0) + 1 }
   const erro = await captura(() => moverFrente(s, 'm-filha', 'm-pai', agora))
-  check(erro instanceof ErroParcial && (await mem.getFrente('m-filha'))?.parentId === 'm-pai', 'mover: posição salva, evento pendente → ErroParcial')
-  await (erro as ErroParcial).completar!()
-  check((await mem.getEventosEstruturais('m-filha')).filter((e) => e.tipo === 'hierarquia_mudou').length === 1, 'completar grava 1 evento hierarquia_mudou')
+  check(erro !== null && (await mem.getFrente('m-filha'))?.parentId === null, 'mover com falha: a frente NÃO fica movida sem o evento')
+  await moverFrente(s, 'm-filha', 'm-pai', agora)
+  check((await mem.getEventosEstruturais('m-filha')).filter((e) => e.tipo === 'hierarquia_mudou').length === 1, 'retry move com exatamente 1 evento')
 }
 
 // ============ excluirFrenteComFilhos ============
@@ -264,27 +243,26 @@ console.log('\n— excluirFrenteComFilhos')
   await criarRegistro(s, { frenteId: 'x-outra', data: agora, texto: 'fica', contaComoMovimento: true })
 
   s.chamadas = {}
-  s.falhar = { método: 'removerFrente', n: 2 } // falha ao remover a 2ª frente (das mais profundas p/ a raiz)
+  s.falhar = { método: 'removerFrenteEmCascata', n: 1 }
   const erro = await captura(() => excluirFrenteComFilhos('x-raiz', s))
-  check(erro instanceof ErroParcial, 'falha no meio da cascata → ErroParcial')
-  check((await mem.getFrente('x-raiz')) !== undefined, 'a raiz ainda existe (é removida por último): retry é possível')
-  check((await mem.getFrente('x-neta')) === undefined, 'a parte já removida continua removida')
+  check(erro !== null && !(erro instanceof ErroParcial), 'falha na exclusão → erro total (nada de "exclusão pela metade")')
+  check((await mem.getFrentes()).length === 4 && (await mem.getTodosRegistros()).length === 4, 'a árvore inteira, com registros, continua lá')
+  await excluirFrenteComFilhos('x-raiz', s)
+  check(!(await mem.getFrentes()).some((f) => f.id.startsWith('x-') && f.id !== 'x-outra'), 'retry conclui a exclusão')
   check((await mem.getRegistros('x-outra')).length === 1, 'frente de fora da cascata intacta')
-  await (erro as ErroParcial).completar!()
-  check(!(await mem.getFrentes()).some((f) => f.id.startsWith('x-') && f.id !== 'x-outra'), 'completar termina a exclusão')
   check((await mem.getTodosRegistros()).every((r) => r.frenteId === 'x-outra'), 'nenhum registro órfão')
   check((await mem.getTodosEventosEstruturais()).every((e) => e.frenteId === 'x-outra'), 'nenhum evento órfão')
   check((await captura(() => excluirFrenteComFilhos('x-raiz', s))) === null, 'excluir de novo uma frente já excluída é no-op (idempotente)')
 }
 {
-  // sem N+1: número de leituras não cresce com a quantidade de frentes
+  // sem N+1: a exclusão de 21 frentes é UMA chamada, sem leituras
   const { s } = novo()
   await criarFrente(s, base('y-raiz', { tipo: 'domínio', cadênciaEsperada: null }))
   for (let i = 0; i < 20; i++) await criarFrente(s, base(`y-${i}`, { parentId: 'y-raiz' }))
   s.chamadas = {}
   await excluirFrenteComFilhos('y-raiz', s)
-  const leituras = (s.chamadas.getFrentes ?? 0) + (s.chamadas.getRegistros ?? 0) + (s.chamadas.getEventosEstruturais ?? 0) + (s.chamadas.getTodosRegistros ?? 0) + (s.chamadas.getTodosEventosEstruturais ?? 0)
-  check(leituras === 3, `exclusão de 21 frentes: ${leituras} leituras (frentes + registros + eventos)`)
+  const leituras = Object.keys(s.chamadas).filter((m) => m.startsWith('get')).length
+  check(leituras === 0 && (s.chamadas.removerFrenteEmCascata ?? 0) === 1, 'exclusão de 21 frentes: 1 chamada atômica, 0 leituras')
 }
 
 // ============ importarPulse ============
@@ -316,3 +294,4 @@ console.log('\n— importarPulse')
 }
 
 console.log(`\n${falhas === 0 ? '✅ Consistência: todos os testes passaram' : `❌ ${falhas} teste(s) falharam`}`)
+if (falhas > 0) process.exit(1)

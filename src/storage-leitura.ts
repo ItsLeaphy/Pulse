@@ -121,6 +121,41 @@ export function comMemoDeLeitura(base: StorageAdapter): LeituraMemo {
     removerEventoEstrutural: async (id) => {
       invalidar()
       await base.removerEventoEstrutural(id)
+    },
+
+    // operações atômicas: invalida antes E depois — se a resposta se
+    // perder, o próximo render nunca serve dado anterior à tentativa
+    salvarFrenteComEventos: async (f, e, esp) => {
+      invalidar()
+      try {
+        return await base.salvarFrenteComEventos(f, e, esp)
+      } finally {
+        invalidar()
+      }
+    },
+    salvarRegistroComCache: async (r, esp) => {
+      invalidar()
+      try {
+        return await base.salvarRegistroComCache(r, esp)
+      } finally {
+        invalidar()
+      }
+    },
+    removerRegistroComCache: async (id) => {
+      invalidar()
+      try {
+        return await base.removerRegistroComCache(id)
+      } finally {
+        invalidar()
+      }
+    },
+    removerFrenteEmCascata: async (id) => {
+      invalidar()
+      try {
+        return await base.removerFrenteEmCascata(id)
+      } finally {
+        invalidar()
+      }
     }
   }
 }

@@ -88,7 +88,8 @@ notificações agressivas, nem assistente que decide o que importa.
 - **`StorageAdapter`** (interface assíncrona única): `LocalStorageAdapter` (modo local), `MemoryAdapter` (testes), `SupabaseAdapter` (produção; RLS; login único). Nenhum outro código toca `localStorage`/Supabase diretamente.
 - **Camada de domínio** (sem UI): `frente-ops` (criar/editar/mudar estado/excluir; único gerador de eventos e único recalculador de `últimoMovimento`), `hierarquia` (mover com prevenção de ciclo), `portabilidade` (export/import validado), `signal` (motor de sinal), `estado`, `historico` (histórico unificado + retrospectiva), `registro-query` (registro global e busca), `ritmo`, `tendencias`, `periodos`.
 - **Leitura por render:** `storage-leitura` cria um instantâneo em memória (frentes/registros/eventos lidos uma vez) por renderização.
-- **Erros:** `erros.ts` normaliza qualquer valor lançado; operações compostas que param no meio lançam `ErroParcial` com `completar` idempotente.
+- **Erros:** `erros.ts` normaliza qualquer valor lançado.
+- **Consistência (decisão permanente):** toda operação composta de Frente/Registro (criar/editar/mover/excluir Frente com eventos; criar/editar/excluir Registro com recálculo de `últimoMovimento`; exclusão em cascata) é **uma única operação atômica do `StorageAdapter`** — tudo ou nada. No Supabase = função RPC (uma transação Postgres, `SECURITY INVOKER`, RLS preservada); no local/memória = cálculo puro + gravação com reversão. `últimoMovimento` é sempre derivado dos registros dentro da operação. Edição usa compare-and-swap (estado "esperado") para nunca sobrescrever alteração mais recente. As regras de domínio continuam em TypeScript (`frente-ops`); o SQL só garante atomicidade, concorrência e segurança.
 - **UI:** Home (leitura editorial), Frentes (árvore), Frente (estado → histórico → ritmo/tendência → retrospectiva → editar), Registrar, Buscar. Tema escuro, mobile primeiro.
 
 Detalhes verificáveis (arquivos, testes, bugs) estão no Handoff.
@@ -131,4 +132,4 @@ estrutura/portabilidade, padrões/tendências.
 - **[PENDENTE]** Weekly Update: formato, escopo e edição antes de exportar (decidido só o princípio: dado estruturado primeiro, texto depois, editável).
 - **[PENDENTE]** Relações entre frentes (adiadas).
 - **[PENDENTE]** Classificação manual opcional de registros (o sistema não pode depender dela).
-- **[PENDENTE]** Operações multi-gravação atômicas no servidor (função/RPC no Postgres) — hoje a consistência é por ordem de escrita + `ErroParcial`/`completar`.
+- **[PENDENTE]** Importação (`importarPulse`) ainda não é atômica (parcial + `completar` em memória); fora do escopo da atomicidade até hoje.

@@ -23,12 +23,16 @@
     "test:erros": "tsx src/test-erros.ts",
     "test:consistencia": "tsx src/test-consistencia.ts",
     "test:leitura": "tsx src/test-leitura.ts",
+    "test:atomicidade": "tsx src/test-atomicidade.ts",
+    "test:pg": "tsx src/test-pg.ts",
     "test:e2e": "playwright test",
-    "test:dominio": "npm run test:motor && npm run test:ops && npm run test:historico && npm run test:estado && npm run test:registro-query && npm run test:hierarquia && npm run test:portabilidade && npm run test:ritmo && npm run test:tendencias && npm run test:periodos && npm run test:ui-cenarios && npm run test:erros && npm run test:supabase && npm run test:leitura && npm run test:consistencia"
+    "test:dominio": "npm run test:motor && npm run test:ops && npm run test:historico && npm run test:estado && npm run test:registro-query && npm run test:hierarquia && npm run test:portabilidade && npm run test:ritmo && npm run test:tendencias && npm run test:periodos && npm run test:ui-cenarios && npm run test:erros && npm run test:supabase && npm run test:leitura && npm run test:consistencia && npm run test:atomicidade"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",
     "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vite": "^5.4.0",
