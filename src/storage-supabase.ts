@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { Frente, Registro, EventoEstrutural } from './types'
 import type { StorageAdapter } from './storage'
+import { normalizarErro } from './erros'
 
 // ============================================================
 // SUPABASE ADAPTER
@@ -12,9 +13,13 @@ import type { StorageAdapter } from './storage'
 //
 // Pulse 2.0: lê/escreve as colunas novas (ciclo_vida, condicao,
 // contexto_*, pausa_*) introduzidas pela migration 001. As colunas
-// antigas (estado, opt_out_negligencia) continuam existindo no
-// banco até a migration 002, mas este adapter não as lê nem
-// escreve mais — elas ficam congeladas com o último valor migrado.
+// legadas (estado, opt_out_negligencia, ultimo_toque) NÃO são lidas
+// nem escritas por este adapter; em bancos que as têm, elas precisam
+// aceitar NULL (migration 004) — senão todo upsert falha com 23502.
+// Contrato com o schema verificado em test-storage-supabase.ts.
+//
+// Erros: todo erro do Supabase (PostgrestError é um objeto simples,
+// não um Error) é convertido em ErroPulse com a operação que falhou.
 // ============================================================
 
 interface FrenteRow {
@@ -137,79 +142,128 @@ function eventoParaRow(e: EventoEstrutural): Omit<EventoEstruturalRow, 'id'> & {
   }
 }
 
+/** Tamanho de página: o PostgREST do Supabase limita respostas a 1000
+ * linhas por padrão e trunca SILENCIOSAMENTE — toda leitura de lista
+ * pagina com range() até esgotar, para nunca devolver dados cortados. */
+const PÁGINA = 1000
+
+type RespostaLista = { data: unknown[] | null; error: unknown }
+type RespostaItem = { data: unknown; error: unknown }
+type RespostaEscrita = { error: unknown }
+
 export class SupabaseAdapter implements StorageAdapter {
   constructor(private client: SupabaseClient) {}
 
+  private async listar<T>(
+    operação: string,
+    pagina: (de: number, até: number) => PromiseLike<RespostaLista>
+  ): Promise<T[]> {
+    const tudo: T[] = []
+    for (let de = 0; ; de += PÁGINA) {
+      const { data, error } = await pagina(de, de + PÁGINA - 1)
+      if (error) throw normalizarErro(error, operação)
+      const lote = (data ?? []) as T[]
+      tudo.push(...lote)
+      if (lote.length < PÁGINA) return tudo
+    }
+  }
+
+  private falhaDeEscrita(operação: string, r: RespostaEscrita): void {
+    if (r.error) throw normalizarErro(r.error, operação)
+  }
+
   async getFrentes(): Promise<Frente[]> {
-    const { data, error } = await this.client.from('frentes').select('*')
-    if (error) throw error
-    return (data as FrenteRow[]).map(rowParaFrente)
+    const rows = await this.listar<FrenteRow>('carregar as frentes', (a, b) =>
+      this.client.from('frentes').select('*').order('id').range(a, b)
+    )
+    return rows.map(rowParaFrente)
   }
 
   async getFrente(id: string): Promise<Frente | undefined> {
-    const { data, error } = await this.client.from('frentes').select('*').eq('id', id).maybeSingle()
-    if (error) throw error
+    const { data, error } = (await this.client.from('frentes').select('*').eq('id', id).maybeSingle()) as RespostaItem
+    if (error) throw normalizarErro(error, 'carregar a frente')
     return data ? rowParaFrente(data as FrenteRow) : undefined
   }
 
   async salvarFrente(f: Frente): Promise<void> {
-    const { error } = await this.client.from('frentes').upsert(frenteParaRow(f))
-    if (error) throw error
+    this.falhaDeEscrita('salvar a frente', await this.client.from('frentes').upsert(frenteParaRow(f)))
   }
 
   async removerFrente(id: string): Promise<void> {
-    const { error } = await this.client.from('frentes').delete().eq('id', id)
-    if (error) throw error
+    this.falhaDeEscrita('excluir a frente', await this.client.from('frentes').delete().eq('id', id))
   }
 
   async getRegistros(frenteId: string): Promise<Registro[]> {
-    const { data, error } = await this.client
-      .from('registros')
-      .select('*')
-      .eq('frente_id', frenteId)
-      .order('data', { ascending: false })
-    if (error) throw error
-    return (data as RegistroRow[]).map(rowParaRegistro)
+    const rows = await this.listar<RegistroRow>('carregar os registros', (a, b) =>
+      this.client
+        .from('registros')
+        .select('*')
+        .eq('frente_id', frenteId)
+        .order('data', { ascending: false })
+        .order('id')
+        .range(a, b)
+    )
+    return rows.map(rowParaRegistro)
+  }
+
+  async getTodosRegistros(): Promise<Registro[]> {
+    const rows = await this.listar<RegistroRow>('carregar os registros', (a, b) =>
+      this.client.from('registros').select('*').order('data', { ascending: false }).order('id').range(a, b)
+    )
+    return rows.map(rowParaRegistro)
   }
 
   async getRegistrosRecentes(limite: number): Promise<Registro[]> {
-    const { data, error } = await this.client
+    const { data, error } = (await this.client
       .from('registros')
       .select('*')
       .order('data', { ascending: false })
-      .limit(limite)
-    if (error) throw error
-    return (data as RegistroRow[]).map(rowParaRegistro)
+      .order('id')
+      .limit(limite)) as RespostaLista
+    if (error) throw normalizarErro(error, 'carregar os registros recentes')
+    return ((data ?? []) as RegistroRow[]).map(rowParaRegistro)
   }
 
   async salvarRegistro(r: Registro): Promise<void> {
-    const { error } = await this.client.from('registros').upsert(registroParaRow(r))
-    if (error) throw error
+    this.falhaDeEscrita('salvar o registro', await this.client.from('registros').upsert(registroParaRow(r)))
   }
 
   async removerRegistro(id: string): Promise<void> {
-    const { error } = await this.client.from('registros').delete().eq('id', id)
-    if (error) throw error
+    this.falhaDeEscrita('excluir o registro', await this.client.from('registros').delete().eq('id', id))
   }
 
   async getEventosEstruturais(frenteId: string): Promise<EventoEstrutural[]> {
-    const { data, error } = await this.client
-      .from('eventos_estruturais')
-      .select('*')
-      .eq('frente_id', frenteId)
-      .order('criado_em', { ascending: false })
-    if (error) throw error
-    return (data as EventoEstruturalRow[]).map(rowParaEvento)
+    const rows = await this.listar<EventoEstruturalRow>('carregar o histórico estrutural', (a, b) =>
+      this.client
+        .from('eventos_estruturais')
+        .select('*')
+        .eq('frente_id', frenteId)
+        .order('criado_em', { ascending: false })
+        .order('id')
+        .range(a, b)
+    )
+    return rows.map(rowParaEvento)
+  }
+
+  async getTodosEventosEstruturais(): Promise<EventoEstrutural[]> {
+    const rows = await this.listar<EventoEstruturalRow>('carregar o histórico estrutural', (a, b) =>
+      this.client.from('eventos_estruturais').select('*').order('criado_em', { ascending: false }).order('id').range(a, b)
+    )
+    return rows.map(rowParaEvento)
   }
 
   async salvarEventoEstrutural(e: EventoEstrutural): Promise<void> {
-    const { error } = await this.client.from('eventos_estruturais').upsert(eventoParaRow(e))
-    if (error) throw error
+    this.falhaDeEscrita(
+      'salvar o evento estrutural',
+      await this.client.from('eventos_estruturais').upsert(eventoParaRow(e))
+    )
   }
 
   async removerEventoEstrutural(id: string): Promise<void> {
-    const { error } = await this.client.from('eventos_estruturais').delete().eq('id', id)
-    if (error) throw error
+    this.falhaDeEscrita(
+      'excluir o evento estrutural',
+      await this.client.from('eventos_estruturais').delete().eq('id', id)
+    )
   }
 }
 

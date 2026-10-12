@@ -37,7 +37,15 @@ import { coletarDescendentes } from './frente-ops'
  */
 export async function registrarGlobal(
   storage: StorageAdapter,
-  dados: { frenteId: string; texto: string; contaComoMovimento: boolean; data?: number }
+  dados: {
+    frenteId: string
+    texto: string
+    contaComoMovimento: boolean
+    data?: number
+    /** só para repetição idempotente (retry da UI); nunca é escolha do usuário */
+    id?: string
+    criadoEm?: number
+  }
 ): Promise<Registro> {
   const frente = await storage.getFrente(dados.frenteId)
   if (!frente) {
@@ -48,10 +56,12 @@ export async function registrarGlobal(
     frenteId: dados.frenteId,
     texto: dados.texto,
     contaComoMovimento: dados.contaComoMovimento,
-    data: dados.data ?? Date.now()
-    // criadoEm propositalmente omitido — criarRegistro usa seu
-    // próprio default (Date.now()); nunca repassamos escolha do
-    // usuário pra esse campo.
+    data: dados.data ?? Date.now(),
+    // id/criadoEm só chegam aqui vindos da chave de idempotência da UI
+    // (mesmo valor em cada tentativa); sem eles, criarRegistro usa seus
+    // defaults (id novo, criadoEm = agora). Nunca é campo do formulário.
+    ...(dados.id !== undefined ? { id: dados.id } : {}),
+    ...(dados.criadoEm !== undefined ? { criadoEm: dados.criadoEm } : {})
   })
 }
 

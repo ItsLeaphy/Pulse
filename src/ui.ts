@@ -7,10 +7,10 @@ import {
   criarRegistro,
   editarRegistro,
   excluirRegistro,
-  mudarCicloVida,
-  mudarCondição,
-  mudarCadência
+  editarFrente
 } from './frente-ops'
+import { ErroParcial, mensagemParaUsuário, registrarDiagnóstico } from './erros'
+import { comMemoDeLeitura } from './storage-leitura'
 import { registrarGlobal, buscarRegistros, type FiltroRegistros } from './registro-query'
 import { obterHistórico, obterRetrospectiva, formatarRetrospectiva, type Período } from './historico'
 import { obterEstadoFrente } from './estado'
@@ -49,6 +49,14 @@ const DIA_MS = 1000 * 60 * 60 * 24
 
 let storageRef: StorageAdapter
 let mainEl: HTMLElement
+/** Cada navegação/recarga incrementa; um render antigo que termina
+ * depois de um novo (rede lenta + clique rápido) é descartado em vez
+ * de sobrescrever a tela atual. */
+let geração = 0
+/** Chaves de idempotência de formulários: o id (e criadoEm) gerados na
+ * primeira tentativa são reutilizados nas repetições, então um retry
+ * depois de falha parcial regrava a MESMA linha em vez de duplicar. */
+const chavesForm = new Map<string, { id: string; criadoEm: number }>()
 let editandoRegistroId: string | null = null
 /** ids de frente expandidos na tela de Frentes (árvore) — estado de
  * UI pura, nunca persistido, perdido ao navegar pra outra rota */
@@ -73,14 +81,120 @@ export function renderApp(storage: StorageAdapter): void {
       </header>
       <main class="shell-main" id="main"></main>
       <nav class="nav-mobile" id="nav-mobile"></nav>
+      <div id="aviso" class="aviso" role="status" aria-live="polite"></div>
     </div>
   `
   mainEl = document.getElementById('main')!
 
   window.addEventListener('hashchange', () => {
-    rotear().catch(mostrarErro)
+    void rotear()
   })
-  rotear().catch(mostrarErro)
+  // rede de segurança: nenhuma promessa rejeitada some em silêncio
+  window.addEventListener('unhandledrejection', (e) => {
+    registrarDiagnóstico('executar uma ação', e.reason)
+    avisar(mensagemParaUsuário(e.reason, 'concluir a ação'), true)
+  })
+  void rotear()
+}
+
+// ---------- AVISOS, CARGA E ERROS ----------
+
+let timerAviso: ReturnType<typeof setTimeout> | undefined
+function avisar(texto: string, erro = false): void {
+  const el = document.getElementById('aviso')
+  if (!el) return
+  el.textContent = texto
+  el.className = `aviso aviso-visivel${erro ? ' aviso-erro' : ''}`
+  if (timerAviso) clearTimeout(timerAviso)
+  timerAviso = setTimeout(() => {
+    el.className = 'aviso'
+  }, erro ? 8000 : 3000)
+}
+
+/** Pinta só se esta renderização ainda é a vigente. */
+function pintar(g: number, html: string): boolean {
+  if (g !== geração) return false
+  mainEl.innerHTML = html
+  mainEl.removeAttribute('aria-busy')
+  return true
+}
+
+function chaveForm(nome: string): { id: string; criadoEm: number } {
+  let c = chavesForm.get(nome)
+  if (!c) {
+    c = { id: novoId(), criadoEm: Date.now() }
+    chavesForm.set(nome, c)
+  }
+  return c
+}
+
+const HTML_STATUS = `<div class="status-form" data-status aria-live="polite"></div>`
+
+function mostrarStatus(el: Element | null, err: unknown, operação: string, aoCompletar?: () => void): void {
+  if (!el) {
+    avisar(mensagemParaUsuário(err, operação), true)
+    return
+  }
+  const parcial = err instanceof ErroParcial && err.completar ? err : null
+  el.innerHTML = `<div class="erro" role="alert">${escapeHtml(mensagemParaUsuário(err, operação))}${
+    parcial ? ` <button type="button" data-completar>Tentar completar</button>` : ''
+  }</div>`
+  if (parcial) {
+    el.querySelector('[data-completar]')!.addEventListener('click', () => {
+      void executarAção({
+        operação,
+        status: el,
+        tentar: parcial.completar!,
+        sucesso: 'Concluído.',
+        aoConcluir: aoCompletar ?? recarregar
+      })
+    })
+  }
+}
+
+interface OpçõesAção {
+  operação: string
+  status: Element | null
+  botão?: HTMLButtonElement | null
+  tentar: () => Promise<unknown>
+  aoConcluir: () => Promise<void> | void
+  sucesso?: string
+}
+
+/** Executa uma ação de escrita com feedback: desabilita o botão
+ * (sem duplo envio), mostra "Salvando…", e em falha mantém o
+ * formulário preenchido e mostra o erro AO LADO da ação — a tela
+ * nunca é substituída por causa de uma ação que falhou. */
+async function executarAção(o: OpçõesAção): Promise<boolean> {
+  const botão = o.botão ?? null
+  const textoOriginal = botão?.textContent ?? ''
+  if (botão) {
+    botão.disabled = true
+    botão.textContent = 'Salvando…'
+  }
+  if (o.status) o.status.innerHTML = ''
+  try {
+    await o.tentar()
+  } catch (err) {
+    registrarDiagnóstico(o.operação, err)
+    mostrarStatus(o.status, err, o.operação, () => void o.aoConcluir())
+    if (botão) {
+      botão.disabled = false
+      botão.textContent = textoOriginal
+    }
+    return false
+  }
+  if (botão) {
+    botão.disabled = false
+    botão.textContent = textoOriginal
+  }
+  if (o.sucesso) avisar(o.sucesso)
+  try {
+    await o.aoConcluir()
+  } catch (err) {
+    mostrarErroDeCarga(err, 'atualizar a tela')
+  }
+  return true
 }
 
 function rotaAtual(): string {
@@ -103,33 +217,72 @@ function renderNav(): void {
   document.getElementById('nav-mobile')!.innerHTML = linksNav('')
 }
 
-function mostrarErro(err: unknown): void {
-  console.error(err)
-  const mensagem = err instanceof Error ? err.message : String(err)
-  mainEl.innerHTML = `<div class="erro">Algo deu errado: ${escapeHtml(mensagem)}</div>`
+function mostrarErroDeCarga(err: unknown, operação: string): void {
+  registrarDiagnóstico(operação, err)
+  mainEl.removeAttribute('aria-busy')
+  mainEl.innerHTML = `
+    <div class="erro" role="alert">
+      <p>${escapeHtml(mensagemParaUsuário(err, operação))}</p>
+      <div class="meta-row">
+        <button type="button" id="btn-tentar-de-novo">Tentar de novo</button>
+        <a href="#/">Ir para a Home</a>
+      </div>
+    </div>`
+  document.getElementById('btn-tentar-de-novo')!.addEventListener('click', () => void recarregar())
 }
 
-async function rotear(): Promise<void> {
+function operaçãoDaRota(partes: string[]): string {
+  if (partes.length === 0) return 'carregar a Home'
+  if (partes[0] === 'frentes') return 'carregar as frentes'
+  if (partes[0] === 'frente') return 'abrir a frente'
+  if (partes[0] === 'registrar') return 'abrir o registro'
+  if (partes[0] === 'buscar') return 'abrir a busca'
+  return 'carregar a Home'
+}
+
+/** Re-renderiza a rota atual com dados novos, sem placeholder de
+ * "carregando" (evita piscar depois de salvar). */
+async function recarregar(): Promise<void> {
+  await rotear(true)
+}
+
+async function rotear(silencioso = false): Promise<void> {
   const hash = rotaAtual()
   const partes = hash.split('/').filter(Boolean)
+  const g = ++geração
 
   renderNav()
+  mainEl.setAttribute('aria-busy', 'true')
 
-  if (partes.length === 0) {
-    await renderHome()
-  } else if (partes[0] === 'frentes') {
-    await renderFrentes()
-  } else if (partes[0] === 'frente' && partes[1]) {
-    await renderFrenteDetail(partes[1])
-  } else if (partes[0] === 'registrar') {
-    await renderRegistrarGlobal()
-  } else if (partes[0] === 'buscar') {
-    await renderBuscar()
-  } else {
-    await renderHome()
+  // "Carregando…" só aparece se a leitura demorar (rede), sem piscar
+  // em leituras rápidas nem sobrescrever a tela ao recarregar após salvar
+  const timerCarga = silencioso
+    ? undefined
+    : setTimeout(() => {
+        if (g === geração) mainEl.innerHTML = `<div class="carregando" role="status">Carregando…</div>`
+      }, 150)
+
+  try {
+    if (partes.length === 0) {
+      await renderHome()
+    } else if (partes[0] === 'frentes') {
+      await renderFrentes()
+    } else if (partes[0] === 'frente' && partes[1]) {
+      await renderFrenteDetail(partes[1])
+    } else if (partes[0] === 'registrar') {
+      await renderRegistrarGlobal()
+    } else if (partes[0] === 'buscar') {
+      await renderBuscar()
+    } else {
+      await renderHome()
+    }
+  } catch (err) {
+    if (g === geração) mostrarErroDeCarga(err, operaçãoDaRota(partes))
+  } finally {
+    if (timerCarga) clearTimeout(timerCarga)
   }
 
-  renderNav()
+  if (g === geração) renderNav()
 }
 
 function ir(hash: string): void {
@@ -143,20 +296,31 @@ function ir(hash: string): void {
 // ============================================================
 
 async function renderHome(): Promise<void> {
+  const g = geração
+  const s = comMemoDeLeitura(storageRef)
   const agora = Date.now()
-  const todasFrentes = await storageRef.getFrentes()
+  const todasFrentes = await s.getFrentes()
 
   let html = `<h1>Pulse</h1>`
 
   if (todasFrentes.length === 0) {
     html += `<p class="subtitulo">Nenhuma frente ainda — comece criando a primeira.</p>`
     html += `<div class="acoes-rapidas"><a href="#/frentes" class="acao-rapida">Criar frente</a></div>`
-    mainEl.innerHTML = html
+    pintar(g, html)
     return
   }
 
+  // as quatro leituras são independentes e compartilham o mesmo
+  // instantâneo (frentes/registros/eventos carregados uma vez só)
+  const período7d: Período = { início: agora - 7 * DIA_MS, fim: agora + 1 }
+  const [emAtenção, domíniosRelevantes, mudançasRecentes, recentes] = await Promise.all([
+    obterAtençãoGeral(s, agora),
+    obterDomíniosComSinalRelevante(s, agora),
+    obterMudançasRecentes(s, período7d),
+    s.getRegistrosRecentes(6)
+  ])
+
   // ---- 1. frentes em atenção (bloqueios, esperas, esfriando, fora do ritmo, pausa vencida) ----
-  const emAtenção = await obterAtençãoGeral(storageRef, agora)
   if (emAtenção.length > 0) {
     html += `<div class="secao-titulo">Merece atenção</div><div class="lista">`
     for (const item of emAtenção.slice(0, 8)) {
@@ -174,7 +338,6 @@ async function renderHome(): Promise<void> {
   }
 
   // ---- 2. situações relevantes em domínios (com causa) ----
-  const domíniosRelevantes = await obterDomíniosComSinalRelevante(storageRef, agora)
   if (domíniosRelevantes.length > 0) {
     html += `<div class="secao-titulo">Domínios</div><div class="lista">`
     for (const d of domíniosRelevantes) {
@@ -195,8 +358,6 @@ async function renderHome(): Promise<void> {
   }
 
   // ---- 3. mudanças recentes (últimos 7 dias) ----
-  const período7d: Período = { início: agora - 7 * DIA_MS, fim: agora + 1 }
-  const mudançasRecentes = await obterMudançasRecentes(storageRef, período7d)
   const totalMudanças = mudançasRecentes.mudanças.length + mudançasRecentes.frentesCriadas.length
   if (totalMudanças > 0) {
     html += `<div class="secao-titulo">Mudanças recentes</div><div class="lista">`
@@ -219,7 +380,6 @@ async function renderHome(): Promise<void> {
   }
 
   // ---- 4. movimentos recentes ----
-  const recentes = await storageRef.getRegistrosRecentes(6)
   if (recentes.length > 0) {
     html += `<div class="secao-titulo">Movimentos recentes</div><div class="lista">`
     for (const r of recentes) {
@@ -243,7 +403,7 @@ async function renderHome(): Promise<void> {
     </div>
   `
 
-  mainEl.innerHTML = html
+  if (!pintar(g, html)) return
   ligarCliquesItem()
 }
 
@@ -259,7 +419,9 @@ function motivoAtençãoTexto(m: { tipo: string; sinal?: string; condição?: Co
 // ============================================================
 
 async function renderFrentes(): Promise<void> {
-  const todasFrentes = await storageRef.getFrentes()
+  const g = geração
+  const s = comMemoDeLeitura(storageRef)
+  const todasFrentes = await s.getFrentes()
   const raízesPorÁrea = (área: Área) => todasFrentes.filter((f) => f.área === área && f.parentId === null)
 
   let html = `<h1>Frentes</h1>`
@@ -271,7 +433,7 @@ async function renderFrentes(): Promise<void> {
     html += `<div class="secao-titulo">${RÓTULO_ÁREA[área]}</div>`
     html += `<div class="lista">`
     for (const frente of raízes) {
-      html += await renderNóÁrvore(frente, todasFrentes, 0)
+      html += await renderNóÁrvore(frente, todasFrentes, 0, s)
     }
     html += `</div>`
   }
@@ -282,14 +444,19 @@ async function renderFrentes(): Promise<void> {
 
   html += renderFormNovaFrente(null)
 
-  mainEl.innerHTML = html
+  if (!pintar(g, html)) return
   ligarCliquesItem()
   ligarExpansãoÁrvore()
   ligarFormNovaFrente(null)
 }
 
-async function renderNóÁrvore(frente: Frente, todasFrentes: Frente[], profundidade: number): Promise<string> {
-  const sinal = await calcularSinalAgregado(frente.id, storageRef)
+async function renderNóÁrvore(
+  frente: Frente,
+  todasFrentes: Frente[],
+  profundidade: number,
+  leitura: StorageAdapter
+): Promise<string> {
+  const sinal = await calcularSinalAgregado(frente.id, leitura)
   const filhos = todasFrentes.filter((f) => f.parentId === frente.id)
   const expandido = expandidos.has(frente.id)
   const indentação = profundidade > 0 ? `style="padding-left:${16 + profundidade * 20}px"` : ''
@@ -308,7 +475,7 @@ async function renderNóÁrvore(frente: Frente, todasFrentes: Frente[], profundi
 
   if (expandido) {
     for (const filho of filhos) {
-      html += await renderNóÁrvore(filho, todasFrentes, profundidade + 1)
+      html += await renderNóÁrvore(filho, todasFrentes, profundidade + 1, leitura)
     }
   }
 
@@ -322,7 +489,7 @@ function ligarExpansãoÁrvore(): void {
       const id = el.dataset.expandir!
       if (expandidos.has(id)) expandidos.delete(id)
       else expandidos.add(id)
-      void renderFrentes()
+      void recarregar()
     })
   })
 }
@@ -334,18 +501,30 @@ function ligarExpansãoÁrvore(): void {
 // ============================================================
 
 async function renderFrenteDetail(id: string): Promise<void> {
-  const frente = await storageRef.getFrente(id)
+  const g = geração
+  const s = comMemoDeLeitura(storageRef)
+  const frente = await s.getFrente(id)
   if (!frente) {
-    await renderHome()
+    pintar(
+      g,
+      `<a href="#/frentes" class="voltar">← frentes</a><div class="vazio">Esta frente não existe (ou foi excluída).</div>`
+    )
     return
   }
 
   const agora = Date.now()
-  const estado = await obterEstadoFrente(storageRef, id, agora)
-  const registros = await storageRef.getRegistros(frente.id)
-  const todasFrentes = await storageRef.getFrentes()
+  const período30d: Período = { início: agora - 30 * DIA_MS, fim: agora + 1 }
+  // leituras independentes em paralelo, sobre o mesmo instantâneo
+  const [estado, todasFrentes, histórico, ritmoHtml] = await Promise.all([
+    obterEstadoFrente(s, id, agora),
+    s.getFrentes(),
+    obterHistórico(s, frente.id),
+    renderRitmoETendência(frente, período30d, agora, s)
+  ])
   const filhos = todasFrentes.filter((f) => f.parentId === frente.id)
-  const pai = frente.parentId ? await storageRef.getFrente(frente.parentId) : null
+  const pai = frente.parentId ? (todasFrentes.find((f) => f.id === frente.parentId) ?? null) : null
+  const temRegistros = histórico.some((i) => i.tipo === 'registro')
+  const sinaisFilhos = await Promise.all(filhos.map((f) => calcularSinalAgregado(f.id, s)))
 
   let html = `<a href="#/frentes" class="voltar">← frentes</a>`
   if (pai) html += `<div class="meta-row"><a href="#/frente/${pai.id}">${escapeHtml(pai.nome)}</a></div>`
@@ -392,14 +571,13 @@ async function renderFrenteDetail(id: string): Promise<void> {
   // ---- sub-frentes ----
   if (filhos.length > 0) {
     html += `<h3>Sub-frentes</h3><div class="lista">`
-    for (const filho of filhos) {
-      const sinalFilho = await calcularSinalAgregado(filho.id, storageRef)
+    filhos.forEach((filho, i) => {
       html += `
         <div class="item" data-id="${filho.id}">
           <span class="item-titulo">${escapeHtml(filho.nome)}</span>
-          ${badgeSinal(sinalFilho)}
+          ${badgeSinal(sinaisFilhos[i] ?? null)}
         </div>`
-    }
+    })
     html += `</div>`
   }
 
@@ -415,16 +593,17 @@ async function renderFrenteDetail(id: string): Promise<void> {
       </label>
       <label><input type="checkbox" id="reg-conta" checked /> Conta como movimento</label>
       <button type="submit">Salvar</button>
+      ${HTML_STATUS}
     </form>
   `
 
   // ---- histórico, traduzido ----
-  html += `<h3>Histórico</h3>`
-  if (registros.length === 0) {
+  html += `<h3>Histórico</h3><div id="status-historico" class="status-form" aria-live="polite"></div>`
+  if (!temRegistros && histórico.length === 0) {
     html += `<div class="vazio">Nenhum registro ainda.</div>`
   } else {
+    if (!temRegistros) html += `<div class="vazio">Nenhum registro ainda.</div>`
     const nomePorId = (nid: string | null) => (nid ? todasFrentes.find((f) => f.id === nid)?.nome ?? '(frente removida)' : 'raiz')
-    const histórico = await obterHistórico(storageRef, frente.id)
     for (const item of histórico) {
       if (item.tipo === 'registro') {
         const r = item.registro
@@ -438,6 +617,7 @@ async function renderFrenteDetail(id: string): Promise<void> {
                   <button type="submit">Salvar</button>
                   <button type="button" class="er-cancelar">Cancelar</button>
                 </div>
+                ${HTML_STATUS}
               </form>
             </div>`
         } else {
@@ -462,8 +642,6 @@ async function renderFrenteDetail(id: string): Promise<void> {
   }
 
   // ---- ritmo e tendência, só quando há evidência ----
-  const período30d: Período = { início: agora - 30 * DIA_MS, fim: agora + 1 }
-  const ritmoHtml = await renderRitmoETendência(frente, período30d, agora)
   if (ritmoHtml) html += ritmoHtml
 
   // ---- retrospectiva ----
@@ -479,7 +657,7 @@ async function renderFrenteDetail(id: string): Promise<void> {
       </label>
       <button type="submit">Ver retrospectiva</button>
     </form>
-    <div id="retro-resultado"></div>
+    <div id="retro-resultado" aria-live="polite"></div>
   `
 
   html += renderFormNovaFrente(frente.id, 'Adicionar sub-frente')
@@ -491,8 +669,9 @@ async function renderFrenteDetail(id: string): Promise<void> {
   const avisoFilhos = filhos.length > 0 ? ` e ${filhos.length} sub-frente(s)` : ''
   html += `<h3>Zona de risco</h3>`
   html += `<button id="btn-excluir-frente" type="button" class="botao-perigo">Excluir "${escapeHtml(frente.nome)}"${avisoFilhos}</button>`
+  html += `<div id="status-excluir" class="status-form" aria-live="polite"></div>`
 
-  mainEl.innerHTML = html
+  if (!pintar(g, html)) return
 
   ligarCliquesItem()
   ligarFormNovaFrente(frente.id)
@@ -507,11 +686,18 @@ async function renderFrenteDetail(id: string): Promise<void> {
  * evidência real (nunca "evidência insuficiente" ocupando espaço
  * sem necessidade: se não há cadência declarada e menos de 2
  * movimentos, a seção inteira some). */
-async function renderRitmoETendência(frente: Frente, período: Período, agora: number): Promise<string | null> {
+async function renderRitmoETendência(
+  frente: Frente,
+  período: Período,
+  agora: number,
+  leitura: StorageAdapter
+): Promise<string | null> {
   if (frente.tipo === 'domínio') return null // domínio não tem ritmo próprio
 
-  const ritmo = await obterRitmoObservado(storageRef, frente.id, período)
-  const tendência = await obterTendênciaFrente(storageRef, frente.id, período)
+  const [ritmo, tendência] = await Promise.all([
+    obterRitmoObservado(leitura, frente.id, período),
+    obterTendênciaFrente(leitura, frente.id, período)
+  ])
 
   if (ritmo.classificação === 'evidência_insuficiente' && tendência.tendência === 'insuficiente_evidência') {
     return null
@@ -521,7 +707,7 @@ async function renderRitmoETendência(frente: Frente, período: Período, agora:
   if (ritmo.classificação !== 'evidência_insuficiente' && ritmo.intervaloMédioDias !== null) {
     html += `<p class="subtitulo">Ritmo observado: aproximadamente ${Math.round(ritmo.intervaloMédioDias)} dia(s) entre movimentos — ${escapeHtml(fraseClassificaçãoRitmo(ritmo.classificação))}</p>`
 
-    const calibração = await sugerirCadência(storageRef, frente.id, período)
+    const calibração = await sugerirCadência(leitura, frente.id, período)
     if (calibração.sugestão !== 'compatível' && calibração.sugestão !== 'evidência_insuficiente') {
       html += `<p class="subtitulo">${escapeHtml(fraseSugestãoCadência(calibração.sugestão))}</p>`
     }
@@ -581,67 +767,86 @@ function renderFormEditarFrente(frente: Frente): string {
         <input type="text" id="ef-bloqueio" value="${escapeHtml(frente.contextoBloqueio ?? '')}" />
       </label>
       <button type="submit">Salvar alterações</button>
+      ${HTML_STATUS}
     </form>
   `
 }
 
 function ligarFormEditarFrente(frente: Frente): void {
-  document.getElementById('form-editar-frente')!.addEventListener('submit', (e) => {
+  const form = document.getElementById('form-editar-frente') as HTMLFormElement
+  form.addEventListener('submit', (e) => {
     e.preventDefault()
-    const nome = (document.getElementById('ef-nome') as HTMLInputElement).value.trim()
-    const área = (document.getElementById('ef-área') as HTMLSelectElement).value as Área
-    const tipo = (document.getElementById('ef-tipo') as HTMLSelectElement).value as TipoFrente
-    const cicloVida = (document.getElementById('ef-ciclo-vida') as HTMLSelectElement).value as CicloVida
-    const condição = (document.getElementById('ef-condição') as HTMLSelectElement).value as Condição
-    const cadênciaStr = (document.getElementById('ef-cadência') as HTMLInputElement).value
-    const cadênciaEsperada = cadênciaStr.trim() === '' ? null : Number(cadênciaStr)
-    const contextoFoco = (document.getElementById('ef-foco') as HTMLInputElement).value.trim() || null
-    const contextoBloqueio = (document.getElementById('ef-bloqueio') as HTMLInputElement).value.trim() || null
-    if (!nome) return
-
-    void (async () => {
-      const atual = await storageRef.getFrente(frente.id)
-      if (!atual) return
-      await storageRef.salvarFrente({ ...atual, nome, área, tipo, contextoFoco, contextoBloqueio })
-      await mudarCicloVida(storageRef, frente.id, cicloVida)
-      await mudarCondição(storageRef, frente.id, condição)
-      await mudarCadência(storageRef, frente.id, cadênciaEsperada)
-      await renderFrenteDetail(frente.id)
-    })()
+    const valor = (id: string) => (document.getElementById(id) as HTMLInputElement).value
+    const cadênciaStr = valor('ef-cadência').trim()
+    const edição = {
+      nome: valor('ef-nome').trim(),
+      área: valor('ef-área') as Área,
+      tipo: valor('ef-tipo') as TipoFrente,
+      cicloVida: valor('ef-ciclo-vida') as CicloVida,
+      condição: valor('ef-condição') as Condição,
+      cadênciaEsperada: cadênciaStr === '' ? null : Number(cadênciaStr),
+      contextoFoco: valor('ef-foco').trim() || null,
+      contextoBloqueio: valor('ef-bloqueio').trim() || null
+    }
+    void executarAção({
+      operação: 'salvar as alterações da frente',
+      botão: form.querySelector<HTMLButtonElement>('button[type="submit"]'),
+      status: form.querySelector('[data-status]'),
+      tentar: () => editarFrente(storageRef, frente.id, edição),
+      sucesso: 'Alterações salvas.',
+      aoConcluir: recarregar
+    })
   })
 }
 
 function ligarFormRegistro(frente: Frente): void {
-  document.getElementById('form-registro')!.addEventListener('submit', (e) => {
+  const form = document.getElementById('form-registro') as HTMLFormElement
+  const chave = `registro:${frente.id}`
+  form.addEventListener('submit', (e) => {
     e.preventDefault()
     const texto = (document.getElementById('reg-texto') as HTMLTextAreaElement).value.trim()
     const contaComoMovimento = (document.getElementById('reg-conta') as HTMLInputElement).checked
     const dataStr = (document.getElementById('reg-data') as HTMLInputElement).value
     const data = dataStr ? new Date(dataStr).getTime() : Date.now()
     if (!texto) return
+    // id e criadoEm fixos entre tentativas: repetir após falha parcial
+    // regrava o MESMO registro (upsert), nunca cria um segundo
+    const { id, criadoEm } = chaveForm(chave)
 
-    void (async () => {
-      await criarRegistro(storageRef, { frenteId: frente.id, data, texto, contaComoMovimento })
-      await renderFrenteDetail(frente.id)
-    })()
+    void executarAção({
+      operação: 'salvar o registro',
+      botão: form.querySelector<HTMLButtonElement>('button[type="submit"]'),
+      status: form.querySelector('[data-status]'),
+      tentar: () => criarRegistro(storageRef, { id, criadoEm, frenteId: frente.id, data, texto, contaComoMovimento }),
+      sucesso: 'Registro salvo.',
+      aoConcluir: async () => {
+        chavesForm.delete(chave)
+        await recarregar()
+      }
+    })
   })
 }
 
 function ligarAçõesRegistro(frente: Frente): void {
+  const statusHistórico = () => document.getElementById('status-historico')
+
   document.querySelectorAll<HTMLElement>('.acao-editar-registro').forEach((el) => {
     el.addEventListener('click', () => {
       editandoRegistroId = el.dataset.id!
-      void renderFrenteDetail(frente.id)
+      void recarregar()
     })
   })
 
   document.querySelectorAll<HTMLElement>('.acao-excluir-registro').forEach((el) => {
     el.addEventListener('click', () => {
       if (!confirm('Excluir este registro? Não dá pra desfazer.')) return
-      void (async () => {
-        await excluirRegistro(storageRef, el.dataset.id!)
-        await renderFrenteDetail(frente.id)
-      })()
+      void executarAção({
+        operação: 'excluir o registro',
+        status: statusHistórico(),
+        tentar: () => excluirRegistro(storageRef, el.dataset.id!, frente.id),
+        sucesso: 'Registro excluído.',
+        aoConcluir: recarregar
+      })
     })
   })
 
@@ -652,43 +857,57 @@ function ligarAçõesRegistro(frente: Frente): void {
       const texto = (form.querySelector('.er-texto') as HTMLTextAreaElement).value.trim()
       const contaComoMovimento = (form.querySelector('.er-conta') as HTMLInputElement).checked
       if (!texto) return
-      void (async () => {
-        await editarRegistro(storageRef, idRegistro, { texto, contaComoMovimento })
-        editandoRegistroId = null
-        await renderFrenteDetail(frente.id)
-      })()
+      void executarAção({
+        operação: 'salvar o registro',
+        botão: form.querySelector<HTMLButtonElement>('button[type="submit"]'),
+        status: form.querySelector('[data-status]'),
+        tentar: () => editarRegistro(storageRef, idRegistro, { texto, contaComoMovimento }, frente.id),
+        sucesso: 'Registro atualizado.',
+        aoConcluir: async () => {
+          editandoRegistroId = null
+          await recarregar()
+        }
+      })
     })
     form.querySelector('.er-cancelar')!.addEventListener('click', () => {
       editandoRegistroId = null
-      void renderFrenteDetail(frente.id)
+      void recarregar()
     })
   })
 }
 
 function ligarFormRetrospectiva(frente: Frente): void {
-  document.getElementById('form-retrospectiva')!.addEventListener('submit', (e) => {
+  const form = document.getElementById('form-retrospectiva') as HTMLFormElement
+  form.addEventListener('submit', (e) => {
     e.preventDefault()
     const dias = Number((document.getElementById('retro-período') as HTMLSelectElement).value)
     const agora = Date.now()
     const período: Período = { início: agora - dias * DIA_MS, fim: agora + 1 }
+    const área = document.getElementById('retro-resultado')!
 
-    void (async () => {
-      const retro = await obterRetrospectiva(storageRef, frente.id, período)
-      const texto = await formatarRetrospectiva(storageRef, retro)
-      const área = document.getElementById('retro-resultado')!
-      // formatarRetrospectiva retorna Markdown simples (#, ##, -) —
-      // renderização mínima linha a linha, sem introduzir parser novo
-      área.innerHTML = texto
-        .split('\n')
-        .map((linha) => {
-          if (linha.startsWith('## ')) return `<h3>${escapeHtml(linha.slice(3))}</h3>`
-          if (linha.startsWith('# ')) return ''
-          if (linha.startsWith('- ')) return `<p class="subtitulo">${escapeHtml(linha.slice(2))}</p>`
-          if (linha.startsWith('_') && linha.endsWith('_')) return `<p class="vazio">${escapeHtml(linha.slice(1, -1))}</p>`
-          return linha ? `<p>${escapeHtml(linha)}</p>` : ''
-        })
-        .join('')
-    })()
+    void executarAção({
+      operação: 'montar a retrospectiva',
+      botão: form.querySelector<HTMLButtonElement>('button[type="submit"]'),
+      status: área,
+      tentar: async () => {
+        const leitura = comMemoDeLeitura(storageRef)
+        const retro = await obterRetrospectiva(leitura, frente.id, período)
+        const texto = await formatarRetrospectiva(leitura, retro)
+        // formatarRetrospectiva retorna Markdown simples (#, ##, -) —
+        // renderização mínima linha a linha, sem introduzir parser novo
+        área.innerHTML = texto
+          .split('\n')
+          .map((linha) => {
+            if (linha.startsWith('## ')) return `<h3>${escapeHtml(linha.slice(3))}</h3>`
+            if (linha.startsWith('# ')) return ''
+            if (linha.startsWith('- ')) return `<p class="subtitulo">${escapeHtml(linha.slice(2))}</p>`
+            if (linha.startsWith('_') && linha.endsWith('_')) return `<p class="vazio">${escapeHtml(linha.slice(1, -1))}</p>`
+            return linha ? `<p>${escapeHtml(linha)}</p>` : ''
+          })
+          .join('')
+      },
+      aoConcluir: () => undefined
+    })
   })
 }
 
@@ -699,10 +918,14 @@ function ligarExclusãoFrente(frente: Frente, qtdFilhos: number, pai: Frente | n
         ? `Isso vai apagar "${frente.nome}", suas ${qtdFilhos} sub-frente(s) e todos os registros associados. Não dá pra desfazer. Confirma?`
         : `Isso vai apagar "${frente.nome}" e todos os seus registros. Não dá pra desfazer. Confirma?`
     if (!confirm(aviso)) return
-    void (async () => {
-      await excluirFrenteComFilhos(frente.id, storageRef)
-      ir(pai ? `/frente/${pai.id}` : '/frentes')
-    })()
+    void executarAção({
+      operação: 'excluir a frente',
+      botão: document.getElementById('btn-excluir-frente') as HTMLButtonElement,
+      status: document.getElementById('status-excluir'),
+      tentar: () => excluirFrenteComFilhos(frente.id, storageRef),
+      sucesso: 'Frente excluída.',
+      aoConcluir: () => ir(pai ? `/frente/${pai.id}` : '/frentes')
+    })
   })
 }
 
@@ -733,6 +956,7 @@ function renderFormNovaFrente(parentId: string | null, título = 'Nova frente'):
         <input type="number" id="nf-cadência" value="7" min="1" required />
       </label>
       <button type="submit">Criar</button>
+      ${HTML_STATUS}
     </form>
   `
 }
@@ -740,6 +964,7 @@ function renderFormNovaFrente(parentId: string | null, título = 'Nova frente'):
 function ligarFormNovaFrente(parentId: string | null): void {
   const form = document.getElementById('form-nova-frente') as HTMLFormElement | null
   if (!form) return
+  const chave = `nova-frente:${parentId ?? 'raiz'}`
 
   form.addEventListener('submit', (e) => {
     e.preventDefault()
@@ -748,28 +973,36 @@ function ligarFormNovaFrente(parentId: string | null): void {
     const tipo = (document.getElementById('nf-tipo') as HTMLSelectElement).value as TipoFrente
     const cadênciaEsperada = Number((document.getElementById('nf-cadência') as HTMLInputElement).value)
     if (!nome) return
+    // mesmo id entre tentativas: repetir após falha parcial completa a
+    // MESMA frente (criarFrente é idempotente por id), sem duplicar
+    const { id, criadoEm } = chaveForm(chave)
 
-    void (async () => {
-      await criarFrente(storageRef, {
-        id: novoId(),
-        nome,
-        área,
-        tipo,
-        parentId,
-        cicloVida: 'ativa',
-        condição: 'normal',
-        cadênciaEsperada,
-        contextoFoco: null,
-        contextoBloqueio: null,
-        pausaMotivo: null,
-        pausaRetomadaEm: null
-      })
-      if (parentId) {
-        await renderFrenteDetail(parentId)
-      } else {
-        await renderFrentes()
+    void executarAção({
+      operação: 'criar a frente',
+      botão: form.querySelector<HTMLButtonElement>('button[type="submit"]'),
+      status: form.querySelector('[data-status]'),
+      tentar: () =>
+        criarFrente(storageRef, {
+          id,
+          criadaEm: criadoEm,
+          nome,
+          área,
+          tipo,
+          parentId,
+          cicloVida: 'ativa',
+          condição: 'normal',
+          cadênciaEsperada,
+          contextoFoco: null,
+          contextoBloqueio: null,
+          pausaMotivo: null,
+          pausaRetomadaEm: null
+        }),
+      sucesso: 'Frente criada.',
+      aoConcluir: async () => {
+        chavesForm.delete(chave)
+        await recarregar()
       }
-    })()
+    })
   })
 }
 
@@ -796,6 +1029,7 @@ function ligarCliquesItem(): void {
 // ---------- REGISTRAR (captura global) ----------
 
 async function renderRegistrarGlobal(): Promise<void> {
+  const g = geração
   const todasFrentes = await storageRef.getFrentes()
   const ordenadas = [...todasFrentes].sort((a, b) => a.nome.localeCompare(b.nome))
 
@@ -804,7 +1038,7 @@ async function renderRegistrarGlobal(): Promise<void> {
 
   if (ordenadas.length === 0) {
     html += `<div class="vazio">Nenhuma frente criada ainda — crie uma frente primeiro.</div>`
-    mainEl.innerHTML = html
+    pintar(g, html)
     return
   }
 
@@ -823,13 +1057,14 @@ async function renderRegistrarGlobal(): Promise<void> {
         <input type="datetime-local" id="rg-data" />
       </label>
       <button type="submit">Registrar</button>
+      ${HTML_STATUS}
     </form>
-    <div id="rg-status"></div>
   `
 
-  mainEl.innerHTML = html
+  if (!pintar(g, html)) return
 
-  document.getElementById('form-registrar-global')!.addEventListener('submit', (e) => {
+  const formGlobal = document.getElementById('form-registrar-global') as HTMLFormElement
+  formGlobal.addEventListener('submit', (e) => {
     e.preventDefault()
     const frenteId = (document.getElementById('rg-frente') as HTMLSelectElement).value
     const texto = (document.getElementById('rg-texto') as HTMLTextAreaElement).value.trim()
@@ -838,21 +1073,27 @@ async function renderRegistrarGlobal(): Promise<void> {
     const data = dataStr ? new Date(dataStr).getTime() : undefined
     if (!texto) return
 
-    void (async () => {
-      try {
-        await registrarGlobal(storageRef, { frenteId, texto, contaComoMovimento, data })
+    const chave = `registro-global:${frenteId}`
+    const { id, criadoEm } = chaveForm(chave)
+
+    void executarAção({
+      operação: 'salvar o registro',
+      botão: formGlobal.querySelector<HTMLButtonElement>('button[type="submit"]'),
+      status: formGlobal.querySelector('[data-status]'),
+      tentar: () => registrarGlobal(storageRef, { frenteId, texto, contaComoMovimento, data, id, criadoEm }),
+      sucesso: 'Registro salvo.',
+      aoConcluir: () => {
+        chavesForm.delete(chave)
         ir(`/frente/${frenteId}`)
-      } catch (err) {
-        document.getElementById('rg-status')!.innerHTML =
-          `<div class="erro">${escapeHtml(err instanceof Error ? err.message : String(err))}</div>`
       }
-    })()
+    })
   })
 }
 
 // ---------- BUSCAR ----------
 
 async function renderBuscar(filtrosIniciais: FiltroRegistros = {}): Promise<void> {
+  const g = geração
   const todasFrentes = await storageRef.getFrentes()
   const ordenadas = [...todasFrentes].sort((a, b) => a.nome.localeCompare(b.nome))
 
@@ -882,13 +1123,20 @@ async function renderBuscar(filtrosIniciais: FiltroRegistros = {}): Promise<void
     <div id="bs-resultados"></div>
   `
 
-  mainEl.innerHTML = html
+  if (!pintar(g, html)) return
 
   const frentesPorId = new Map(todasFrentes.map((f) => [f.id, f]))
 
   async function executarBusca(filtros: FiltroRegistros): Promise<void> {
-    const resultados = await buscarRegistros(storageRef, filtros)
     const area = document.getElementById('bs-resultados')!
+    let resultados
+    try {
+      resultados = await buscarRegistros(comMemoDeLeitura(storageRef), filtros)
+    } catch (err) {
+      registrarDiagnóstico('buscar registros', err)
+      mostrarStatus(area, err, 'buscar registros', () => void executarBusca(filtros))
+      return
+    }
     if (resultados.length === 0) {
       area.innerHTML = `<div class="vazio">Nenhum registro encontrado.</div>`
       return

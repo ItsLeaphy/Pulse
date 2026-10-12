@@ -514,3 +514,68 @@ button:hover {
   border-top: 1px solid var(--border);
   margin: var(--space-6) 0;
 }
+
+/* ---------- Fase A: feedback de operações ---------- */
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.status-form:empty {
+  display: none;
+}
+
+.status-form {
+  margin-top: var(--space-3);
+}
+
+.erro button {
+  margin-top: var(--space-2);
+}
+
+.carregando {
+  color: var(--texto-fraco);
+  padding: var(--space-6) 0;
+  font-size: 0.9rem;
+}
+
+.aviso {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--space-6) + 56px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  max-width: min(92vw, 480px);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-3);
+  color: var(--texto);
+  border: 1px solid var(--border-forte);
+  border-radius: var(--raio);
+  font-size: 0.88rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+}
+
+.aviso-visivel {
+  opacity: 1;
+}
+
+.aviso-erro {
+  color: var(--erro);
+  background: var(--erro-bg);
+  border-color: color-mix(in srgb, var(--erro) 40%, transparent);
+}
+
+@media (min-width: 720px) {
+  .aviso {
+    bottom: var(--space-6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aviso {
+    transition: none;
+  }
+}

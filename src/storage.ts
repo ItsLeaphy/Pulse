@@ -15,11 +15,15 @@ export interface StorageAdapter {
   removerFrente(id: string): Promise<void>
 
   getRegistros(frenteId: string): Promise<Registro[]>
+  /** Todos os registros de uma vez (leitura em lote — evita N consultas). */
+  getTodosRegistros(): Promise<Registro[]>
   getRegistrosRecentes(limite: number): Promise<Registro[]>
   salvarRegistro(r: Registro): Promise<void>
   removerRegistro(id: string): Promise<void>
 
   getEventosEstruturais(frenteId: string): Promise<EventoEstrutural[]>
+  /** Todos os eventos estruturais de uma vez (leitura em lote). */
+  getTodosEventosEstruturais(): Promise<EventoEstrutural[]>
   salvarEventoEstrutural(e: EventoEstrutural): Promise<void>
   removerEventoEstrutural(id: string): Promise<void>
 }
@@ -82,6 +86,10 @@ export class LocalStorageAdapter implements StorageAdapter {
       .sort((a, b) => b.data - a.data)
   }
 
+  async getTodosRegistros(): Promise<Registro[]> {
+    return [...this.lerRegistros()].sort((a, b) => b.data - a.data || a.id.localeCompare(b.id))
+  }
+
   async getRegistrosRecentes(limite: number): Promise<Registro[]> {
     return this.lerRegistros()
       .sort((a, b) => b.data - a.data)
@@ -104,6 +112,10 @@ export class LocalStorageAdapter implements StorageAdapter {
     return this.lerEventos()
       .filter((e) => e.frenteId === frenteId)
       .sort((a, b) => b.criadoEm - a.criadoEm)
+  }
+
+  async getTodosEventosEstruturais(): Promise<EventoEstrutural[]> {
+    return [...this.lerEventos()].sort((a, b) => b.criadoEm - a.criadoEm || a.id.localeCompare(b.id))
   }
 
   async salvarEventoEstrutural(e: EventoEstrutural): Promise<void> {
@@ -151,6 +163,10 @@ export class MemoryAdapter implements StorageAdapter {
       .sort((a, b) => b.data - a.data)
   }
 
+  async getTodosRegistros(): Promise<Registro[]> {
+    return [...this.registros].sort((a, b) => b.data - a.data || a.id.localeCompare(b.id))
+  }
+
   async getRegistrosRecentes(limite: number): Promise<Registro[]> {
     return [...this.registros].sort((a, b) => b.data - a.data).slice(0, limite)
   }
@@ -169,6 +185,10 @@ export class MemoryAdapter implements StorageAdapter {
     return this.eventos
       .filter((e) => e.frenteId === frenteId)
       .sort((a, b) => b.criadoEm - a.criadoEm)
+  }
+
+  async getTodosEventosEstruturais(): Promise<EventoEstrutural[]> {
+    return [...this.eventos].sort((a, b) => b.criadoEm - a.criadoEm || a.id.localeCompare(b.id))
   }
 
   async salvarEventoEstrutural(e: EventoEstrutural): Promise<void> {

@@ -1,5 +1,6 @@
 import type { StorageAdapter } from './storage'
 import type { Frente, Registro, EventoEstrutural } from './types'
+import { ErroParcial } from './erros'
 
 // ============================================================
 // PORTABILIDADE — BLOCO 5 (export/import)
@@ -40,12 +41,13 @@ export interface PulseExport {
 export async function exportarPulse(storage: StorageAdapter, agora: number = Date.now()): Promise<PulseExport> {
   const frentes = [...(await storage.getFrentes())].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 
-  const registros: Registro[] = []
-  const eventosEstruturais: EventoEstrutural[] = []
-  for (const f of frentes) {
-    registros.push(...(await storage.getRegistros(f.id)))
-    eventosEstruturais.push(...(await storage.getEventosEstruturais(f.id)))
-  }
+  // leitura em lote (3 consultas, não 2 por frente); só entra o que
+  // pertence a uma frente existente — igual ao comportamento anterior
+  const ids = new Set(frentes.map((f) => f.id))
+  const registros: Registro[] = (await storage.getTodosRegistros()).filter((r) => ids.has(r.frenteId))
+  const eventosEstruturais: EventoEstrutural[] = (await storage.getTodosEventosEstruturais()).filter((e) =>
+    ids.has(e.frenteId)
+  )
   registros.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   eventosEstruturais.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 
@@ -261,10 +263,8 @@ export async function importarPulse(storage: StorageAdapter, dados: unknown): Pr
   if (errosColisão.length === 0) {
     const idsRegistrosExistentes = new Set<string>()
     const idsEventosExistentes = new Set<string>()
-    for (const f of frentesExistentes) {
-      for (const r of await storage.getRegistros(f.id)) idsRegistrosExistentes.add(r.id)
-      for (const e of await storage.getEventosEstruturais(f.id)) idsEventosExistentes.add(e.id)
-    }
+    for (const r of await storage.getTodosRegistros()) idsRegistrosExistentes.add(r.id)
+    for (const e of await storage.getTodosEventosEstruturais()) idsEventosExistentes.add(e.id)
     for (const r of pulseExport.registros) {
       if (idsRegistrosExistentes.has(r.id)) {
         errosColisão.push({ campo: 'registros', mensagem: `registro ${r.id} já existe no destino` })
@@ -281,13 +281,51 @@ export async function importarPulse(storage: StorageAdapter, dados: unknown): Pr
   // tudo validado — agora sim escreve. Frentes primeiro (registros/
   // eventos referenciam frenteId e precisam que a frente já exista
   // no storage de destino, para adapters que validam FK, ex. Supabase).
-  for (const f of pulseExport.frentes) {
-    await storage.salvarFrente(f)
+  // Pais antes dos filhos (FK parent_id no Supabase). Todas as
+  // gravações são upsert por id, então repetir depois de uma falha
+  // no meio completa sem duplicar — mas a checagem de colisão acima
+  // rejeitaria a repetição, por isso o ErroParcial traz `completar`
+  // (que pula a checagem e só regrava).
+  const frentesOrdenadas = ordenarPaisPrimeiro(pulseExport.frentes)
+  let gravados = 0
+  const total = frentesOrdenadas.length + pulseExport.registros.length + pulseExport.eventosEstruturais.length
+  const gravar = async (): Promise<void> => {
+    try {
+      for (const f of frentesOrdenadas) {
+        await storage.salvarFrente(f)
+        gravados++
+      }
+      for (const r of pulseExport.registros) {
+        await storage.salvarRegistro(r)
+        gravados++
+      }
+      for (const e of pulseExport.eventosEstruturais) {
+        await storage.salvarEventoEstrutural(e)
+        gravados++
+      }
+    } catch (err) {
+      throw new ErroParcial(
+        'Importar dados',
+        [`${gravados} de ${total} item(ns) gravado(s)`],
+        [`${total - gravados} item(ns)`],
+        err,
+        gravar
+      )
+    }
   }
-  for (const r of pulseExport.registros) {
-    await storage.salvarRegistro(r)
+  await gravar()
+}
+
+function ordenarPaisPrimeiro(frentes: Frente[]): Frente[] {
+  const porId = new Map(frentes.map((f) => [f.id, f]))
+  const profundidade = (f: Frente): number => {
+    let n = 0
+    let atual: Frente | undefined = f
+    while (atual && atual.parentId !== null && porId.has(atual.parentId) && n <= frentes.length) {
+      atual = porId.get(atual.parentId)
+      n++
+    }
+    return n
   }
-  for (const e of pulseExport.eventosEstruturais) {
-    await storage.salvarEventoEstrutural(e)
-  }
+  return [...frentes].sort((a, b) => profundidade(a) - profundidade(b))
 }
