@@ -1,6 +1,6 @@
 import type { StorageAdapter } from './storage'
 import type { Frente } from './types'
-import { coletarDescendentes, gravarEventos, montarEvento } from './frente-ops'
+import { coletarDescendentes, montarEvento } from './frente-ops'
 
 // ============================================================
 // HIERARQUIA — BLOCO 5 (reparenting)
@@ -67,9 +67,8 @@ export async function moverFrente(
 
   const parentAnterior = frente.parentId
   const atualizada: Frente = { ...frente, parentId: novoParentId }
-  await storage.salvarFrente(atualizada)
-  await gravarEventos(storage, 'Mover frente', ['nova posição na hierarquia'], [
-    montarEvento(frenteId, 'hierarquia_mudou', parentAnterior, novoParentId, agora)
-  ])
-  return atualizada
+  // posição nova + evento de hierarquia na mesma transação; o storage
+  // também revalida pai existente e ausência de ciclo (concorrência)
+  const eventos = [montarEvento(frenteId, 'hierarquia_mudou', parentAnterior, novoParentId, agora)]
+  return (await storage.salvarFrenteComEventos(atualizada, eventos, frente)).frente
 }

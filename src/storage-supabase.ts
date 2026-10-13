@@ -1,7 +1,13 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { Frente, Registro, EventoEstrutural } from './types'
-import type { StorageAdapter } from './storage'
-import { normalizarErro } from './erros'
+import type {
+  StorageAdapter,
+  ResultadoFrente,
+  ResultadoRegistro,
+  ResultadoRemoçãoRegistro,
+  ResultadoExclusãoFrente
+} from './storage'
+import { ErroPulse, normalizarErro } from './erros'
 
 // ============================================================
 // SUPABASE ADAPTER
@@ -264,6 +270,56 @@ export class SupabaseAdapter implements StorageAdapter {
       'excluir o evento estrutural',
       await this.client.from('eventos_estruturais').delete().eq('id', id)
     )
+  }
+
+  // ----------------------------------------------------------
+  // OPERAÇÕES ATÔMICAS — funções RPC da migration 005. Cada chamada é
+  // UMA transação no Postgres: tudo ou nada. Não há fallback para uma
+  // sequência de chamadas HTTP: se a função não existe, o erro diz que
+  // falta aplicar a migration (descreverMotivo em erros.ts).
+  // ----------------------------------------------------------
+
+  private async rpc(operação: string, função: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { data, error } = (await this.client.rpc(função, args)) as RespostaItem
+    if (error) throw normalizarErro(error, operação)
+    if (typeof data !== 'object' || data === null || typeof (data as { status?: unknown }).status !== 'string') {
+      // resposta que não dá para interpretar: o resultado é INCERTO.
+      // Repetir é seguro (as funções são idempotentes).
+      throw new ErroPulse(operação, { mensagem: 'Resposta inesperada do servidor. Verifique se a operação foi concluída antes de repetir.' })
+    }
+    return data as Record<string, unknown>
+  }
+
+  async salvarFrenteComEventos(frente: Frente, eventos: EventoEstrutural[], esperado: Frente | null): Promise<ResultadoFrente> {
+    const r = await this.rpc('salvar a frente', 'pulse_salvar_frente', {
+      p_frente: frenteParaRow(frente),
+      p_esperado: esperado ? frenteParaRow(esperado) : null,
+      p_eventos: eventos.map(eventoParaRow)
+    })
+    return { status: r.status as ResultadoFrente['status'], frente: rowParaFrente(r.frente as FrenteRow) }
+  }
+
+  async salvarRegistroComCache(registro: Registro, esperado: Registro | null): Promise<ResultadoRegistro> {
+    const r = await this.rpc('salvar o registro', 'pulse_salvar_registro', {
+      p_registro: registroParaRow(registro),
+      p_esperado: esperado ? registroParaRow(esperado) : null
+    })
+    return { status: r.status as ResultadoRegistro['status'], registro: rowParaRegistro(r.registro as RegistroRow) }
+  }
+
+  async removerRegistroComCache(id: string): Promise<ResultadoRemoçãoRegistro> {
+    const r = await this.rpc('excluir o registro', 'pulse_excluir_registro', { p_id: id })
+    return { status: r.status as ResultadoRemoçãoRegistro['status'] }
+  }
+
+  async removerFrenteEmCascata(id: string): Promise<ResultadoExclusãoFrente> {
+    const r = await this.rpc('excluir a frente', 'pulse_excluir_frente', { p_id: id })
+    return {
+      status: r.status as ResultadoExclusãoFrente['status'],
+      frentes: Number(r.frentes ?? 0),
+      registros: Number(r.registros ?? 0),
+      eventos: Number(r.eventos ?? 0)
+    }
   }
 }
 

@@ -191,24 +191,43 @@ test('falha ao salvar: erro local ao lado do formulário, app continua, retry se
   expect(s.eventos.filter((e) => e.tipo === 'criação')).toHaveLength(1)
 })
 
-test('falha parcial: frente salva, histórico não → "Tentar completar" sem duplicar', async ({ page }) => {
+test('falha no meio da gravação: NADA fica salvo (sem estado parcial) e o retry cria uma vez', async ({ page }) => {
   await page.goto('./#/frentes')
+  // a frente seria gravada, mas a gravação dos eventos falha: a operação inteira é revertida
   await sim(page, { falharEscritaChaves: ['controle-pessoal:eventos-estruturais'] })
-  await criarFrente(page, 'Parcial', 'projeto', '7')
+  await criarFrente(page, 'Atômica', 'projeto', '7')
 
   const erro = page.locator('#form-nova-frente .erro')
-  await expect(erro).toContainText('Parte da operação foi salva')
-  await expect(erro).not.toContainText('Não foi possível criar')
+  await expect(erro).toContainText('Não foi possível criar a frente')
+  await expect(erro).not.toContainText('Parte da operação foi salva')
+  await expect(page.locator('body')).not.toContainText('[object Object]')
   let s = await lerStore(page)
-  expect(s.frentes).toHaveLength(1)
+  expect(s.frentes).toHaveLength(0) // nem a frente ficou sem o evento
   expect(s.eventos).toHaveLength(0)
 
   await sim(page, { falharEscritaChaves: [] })
-  await erro.getByRole('button', { name: 'Tentar completar' }).click()
-  await expect(aviso(page)).toContainText('Concluído')
+  await page.locator('#form-nova-frente button[type="submit"]').click()
+  await expect(aviso(page)).toContainText('Frente criada')
   s = await lerStore(page)
   expect(s.frentes).toHaveLength(1)
   expect(s.eventos.filter((e) => e.tipo === 'criação')).toHaveLength(1)
+})
+
+test('editar Frente com falha na gravação de eventos: a frente NÃO fica alterada pela metade', async ({ page }) => {
+  await page.goto('./#/frentes')
+  await criarFrente(page, 'Estável', 'projeto', '7')
+  await page.locator('.item', { hasText: 'Estável' }).first().click()
+  await expect(page.locator('main h1')).toContainText('Estável')
+  const antes = await lerStore(page)
+
+  await sim(page, { falharEscritaChaves: ['controle-pessoal:eventos-estruturais'] })
+  await page.locator('[id="ef-nome"]').fill('Renomeada')
+  await page.locator('[id="ef-condição"]').selectOption('bloqueada')
+  await page.locator('#form-editar-frente button[type="submit"]').click()
+  await expect(page.locator('#form-editar-frente .erro')).toBeVisible()
+  const meio = await lerStore(page)
+  expect(meio.frentes).toEqual(antes.frentes)
+  expect(meio.eventos).toEqual(antes.eventos)
 })
 
 test('falha ao carregar: painel de erro com "Tentar de novo"; a navegação continua; retry recupera', async ({ page }) => {

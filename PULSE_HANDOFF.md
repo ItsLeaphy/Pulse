@@ -1,116 +1,121 @@
 # PULSE — HANDOFF
 
 Estado técnico **verificável** para quem continuar o projeto (inclusive em outra
-conta/sessão). Propósito, modelo e princípios estão no `PULSE_PRODUCT_BRIEF.md`
-— não repetidos aqui. Tudo abaixo foi conferido no código ou executado; o que
-**não** foi validado está dito como tal.
+conta/sessão). Propósito, modelo e princípios: `PULSE_PRODUCT_BRIEF.md` (não
+repetidos aqui). Cada afirmação abaixo foi conferida no código ou executada; o
+que **não** foi validado está dito como tal. Fontes de cada teste são
+separadas: *executado no ambiente de desenvolvimento*, *PostgreSQL real local*
+e *relatado pela usuária no Supabase real*.
 
 ## 1. Fase atual
 
-**Fase A — Estabilização técnica: implementada e validada localmente. Não validada
-contra o Supabase remoto de Dani** (sem acesso a ele neste ambiente).
-Fases seguintes (3 e 4 do roadmap de UI) **não foram iniciadas**.
+**Fase A — Estabilização técnica, pacote 2: fechamento da consistência.**
+Operações compostas de persistência agora são atômicas (RPC transacional no
+Supabase). **A migration 005 NÃO foi aplicada nem testada no Supabase real da
+usuária** — a atomicidade está provada em PostgreSQL real local, não no
+Supabase. Fases B (sistema de registros), C (UI) e D (compreensão) **não foram
+iniciadas**.
 
 ## 2. Git
 
-- Repositório criado nesta sessão a partir do zip entregue (`Pulse-2.0-fase2-experiencia-central.zip`); **não tem remote** nem histórico anterior.
-- Branch `fase-a-estabilizacao`:
-  - `a67ecc5` — baseline: conteúdo exato do zip da Fase 2.
-  - commits seguintes — Fase A (tudo é trabalho desta sessão; nada de terceiros foi commitado).
-- `master` aponta para o baseline. Para ver o que mudou: `git diff a67ecc5..fase-a-estabilizacao`.
-- Ao integrar ao repositório real (`github.com/ItsLeaphy/Pulse`), traga a branch ou aplique o diff; não há segredos no repositório (`.env*` ignorados; `.env.example` só tem placeholders).
+- Repositório sem remote (criado a partir do zip da Fase 2). Branches:
+  - `master` / `a67ecc5` — baseline (conteúdo exato do zip da Fase 2).
+  - `fase-a-estabilizacao` — pacote 1 (`7bc7dde`, `abc2abe`).
+  - **`fase-a-fechamento-consistencia`** — este pacote (parte de `fase-a-estabilizacao`). Último commit: ver `git log -1`.
+- Nenhum reset, force-push ou reescrita de histórico. Tudo commitado é trabalho desta série de sessões; nada de terceiros.
+- Sem segredos no repositório (`.env*` ignorados; `.env.example` só placeholders; a senha `pulse_test` do banco de teste local é descartável e documentada).
 
-## 3. Estado real do sistema
+## 3. Estado verificado do Supabase real (relatado pela usuária — não executado por Claude)
 
-Funciona (verificado por testes, ver §6): modelo completo (Blocos 1–6), UI das Fases 1–2, operações de domínio, export/import (só em código, **sem UI**), erros normalizados, leitura única por render.
+Aplicadas ao Supabase real: migrations **001, 002, 003 e 004**. Verificações da usuária: tabela `eventos_estruturais` existe; `registros.criado_em` existe e é obrigatório; `frentes.ciclo_vida`/`condicao` existem; `estado`/`ultimo_toque`/`opt_out_negligencia` aceitam NULL; restrição do evento `hierarquia_mudou` existe; RLS + política em `eventos_estruturais`.
 
-**Não existe na UI ainda:** reparenting, import/export, comparação de períodos, filtros avançados de busca, Weekly Update.
+Testes manuais da usuária no app publicado (versão **anterior a este pacote**, sem a 005), todos passaram: login; carregar Home e Frentes; criar Frente temporária; criar Registro; recarregar com dados preservados; concluir a Frente e editar o nome depois; excluir Registro e Frente temporários. Isso valida os caminhos normais da versão anterior; **não** valida atomicidade nem nada desta versão.
 
-## 4. Problemas reportados × o que foi encontrado
+## 4. O que mudou neste pacote
 
-| Relato | Evidência | Situação |
-|---|---|---|
-| `Algo deu errado: [object Object]` | **Reproduzido por leitura de código e por teste**: o `SupabaseAdapter` fazia `throw error` com o `PostgrestError` do Supabase (objeto simples, **não** `Error`) e `mostrarErro` usava `String(err)`. | Corrigido: `erros.ts` normaliza qualquer valor; adapter lança `ErroPulse` (código/mensagem/detalhes/dica); `test:erros` (44) e `test:supabase` (53) cobrem. |
-| Falha ao salvar Frentes / persistência | **Reproduzido contra o schema documentado** (teste de contrato, não contra o banco real): em `supabase-schema.sql` v1, `estado` e `ultimo_toque` são `NOT NULL` sem default; o adapter não os escreve; o Postgres checa NOT NULL antes de resolver o upsert ⇒ **todo** `salvarFrente` falha (23502) em banco v1 + migrations 001–003. | Corrigido no contrato: `supabase-migration-004-compat-adapter.sql` (aditiva) + `supabase-schema-atual.sql` (instalação nova). **Precisa ser aplicada por Dani** (§7). |
-| Erros ao selecionar/abrir Frentes | **Não reproduzido de forma independente.** Hipótese forte, consistente com o contrato: abrir Frente/Home lê `eventos_estruturais` e `registros.criado_em`; num banco sem as migrations 001/002 essas leituras falham (42P01/PGRST205/42703). Antes, o erro virava `[object Object]` e substituía a tela inteira. | Agora a mensagem diz "banco desatualizado — aplique as migrações" e só a área principal é afetada, com "Tentar de novo". A causa real no banco de Dani **só se confirma verificando quais migrations ele aplicou**. |
-| Lentidão | **Reproduzido por contagem de leituras** (`test:leitura`): sinal agregado de 25 frentes = 135 leituras; Home de 25 frentes = 114 leituras (`getFrentes()` por nó, `getRegistros`/`getEventos` por frente, `encontrarRegistro` varrendo todas as frentes). | Corrigido: instantâneo por render (`storage-leitura.ts`) ⇒ Home = 3 leituras reais; leituras da tela em paralelo; exclusão = 3 leituras; `encontrarRegistro` usa a frente conhecida. Tempo real em rede **não foi medido**. |
-| Operações compostas sem consistência | **Reproduzido** no código original (script contra o commit baseline): editar uma Frente concluída/arquivada salvava o nome e **depois lançava** "não está ativa" (`mudarCondição` checava o ciclo antes de comparar valores). | Corrigido: `editarFrente` (1 gravação + eventos), ver §5. |
-| Usuário sem saber se concluiu | Handlers `void (async()=>{…})()` sem `try/catch` (rejeições não tratadas). | Corrigido: `executarAção` (botão desabilitado, "Salvando…", aviso de sucesso, erro ao lado da ação, formulário preservado). |
-| Testes não provam ponta a ponta | Só havia scripts de domínio. | 23 testes Playwright em Chromium real (§6). |
+**Problema confirmado no código antes da mudança** (`frente-ops.ts`): criar/editar/mudar/mover Frente gravava a linha e depois os eventos em chamadas separadas; criar/editar/excluir Registro gravava e depois recalculava `últimoMovimento` (que lia todos os registros e regravava a frente com um valor lido antes — também podia sobrescrever com valor velho); `excluirFrenteComFilhos` fazia N+M remoções soltas. `ErroParcial.completar()` vivia só em memória: recarregar a página perdia a recuperação.
 
-## 5. Alterações (principais)
+**Solução:**
+- `supabase-migration-005-operacoes-atomicas.sql` (aditiva; **não aplicada**): 4 funções RPC — `pulse_salvar_frente(p_frente, p_esperado, p_eventos)`, `pulse_salvar_registro(p_registro, p_esperado)`, `pulse_excluir_registro(p_id)`, `pulse_excluir_frente(p_id)` — + 2 auxiliares internas. Cada uma = uma transação.
+  - `SECURITY INVOKER` (não DEFINER), `search_path` fixo, EXECUTE revogado de `PUBLIC`/`anon`, concedido a `authenticated`. RLS continua valendo; funções checam sob RLS que pai/frente-dona existem (o FK ignora RLS).
+  - Retry/conflito sem coluna nova: compare-and-swap com o estado "esperado" lido pelo cliente. atual=esperado → aplica; atual=novo → `ja_aplicada` (não regrava nem duplica evento); outro → `PU409` (nada sobrescrito). Criação idempotente por id (`ja_existia`; criações simultâneas idênticas → 1 `criada` + resto `ja_existia`). Eventos têm id fixo + `on conflict do nothing`.
+  - `ultimo_movimento` **nunca vem do cliente**: recalculado dos registros dentro da transação, com a frente travada (`FOR UPDATE`, ordem frente→registro).
+  - Exclusão de árvore explícita (não depende de `ON DELETE CASCADE`), termina mesmo com ciclo corrompido, idempotente.
+  - Erros próprios: `PU404` não existe, `PU409` conflito, `PU422` inválido (ciclo, pai inexistente, nome vazio, evento de outra frente).
+  - Pré-condições (bloco `DO`) recusam aplicar sem 001–004 com mensagem clara.
+- `StorageAdapter` ganhou 4 operações atômicas (`salvarFrenteComEventos`, `salvarRegistroComCache`, `removerRegistroComCache`, `removerFrenteEmCascata`). `SupabaseAdapter` = 1 RPC cada, **sem fallback não atômico** (sem a 005 o erro é "banco desatualizado — aplique a 005"). Local/Memória usam `storage-atomico.ts` (funções puras, espelho TS do SQL) e o Local grava as 3 chaves com **reversão** se alguma falhar.
+- `frente-ops.ts`/`hierarquia.ts`: mesmas assinaturas públicas e regras de domínio; cada operação decide o que mudar e entrega UMA chamada atômica. `registrarEvento`/`gravarEventos`/`recalcularÚltimoMovimento` removidos. `excluirRegistro` não lê mais nada.
+- UI: sem mudança visual. Um conflito (`PU409`) aparece como mensagem pedindo para recarregar; não há reconciliação automática.
+- Testes: `teste-atomico-comum.ts` (mesma suíte para memória, local e Supabase), `test-atomicidade.ts`, `test-pg.ts` + `teste-pg-cliente.ts` (PostgreSQL real), `test-consistencia.ts` reescrito (falha agora = nada muda, não "parcial"), e2e "falha parcial" substituído por 2 testes de reversão. `db-teste/shim-supabase.sql`. README atualizado. Dep. de dev: `pg`, `@types/pg`.
 
-**Novos:** `src/erros.ts`, `src/storage-leitura.ts`, `src/test-erros.ts`, `src/test-storage-supabase.ts`, `src/test-leitura.ts`, `src/test-consistencia.ts`, `e2e/` (`fluxos.spec.ts`, `responsivo.spec.ts`, `helpers.ts`), `playwright.config.ts`, `supabase-schema-atual.sql`, `supabase-migration-004-compat-adapter.sql`, `PULSE_PRODUCT_BRIEF.md`, este arquivo.
+## 5. Testes e resultados
 
-**Alterados:** `src/storage.ts` (+`getTodosRegistros`, `getTodosEventosEstruturais` no contrato), `src/storage-supabase.ts` (erros estruturados, paginação 1000, leituras em lote), `src/frente-ops.ts`, `src/hierarquia.ts`, `src/portabilidade.ts`, `src/registro-query.ts`, `src/ui.ts`, `src/main.ts`, `src/style.css` (aviso/status/loading), `README.md` (reescrito), `package.json` (+scripts, `@playwright/test`, `@types/node`), `.gitignore`.
+**A. Executados no ambiente de desenvolvimento, sem banco (resultado real):**
+- `npm run typecheck` limpo · `npm run build` ok.
+- `npm run test:dominio` (16 suites: motor, ops, histórico, estado, registro-query, hierarquia, portabilidade, ritmo, tendências, períodos, ui-cenarios, erros, supabase [contrato com SQL interpretado], leitura, consistência, atomicidade): **0 falhas**. `test:atomicidade` = 130 verificações (memória + local, incluindo reversão real de gravação que falha no meio; mutação sem reversão → 10 falhas, confirmando que o teste detecta).
+- `npm run test:e2e` (Playwright 1.56, Chromium, build de produção, modo local): **24/24**.
 
-**Decisões técnicas:**
-- **Consistência sem transação:** ordem de escrita = estado primeiro, evento depois. Se o evento falha, lança `ErroParcial` (diz o que foi salvo e o que falta) com `completar()` que regrava só o pendente; eventos têm id fixo ⇒ idempotente. Criar frente/registro é idempotente por id (a UI reutiliza o mesmo id/`criadoEm` nas repetições).
-- **`editarFrente`** substitui salvar + `mudarCicloVida` + `mudarCondição` + `mudarCadência` (4+ gravações). Mesmas invariantes (concluída/arquivada ⇒ condição `normal`; condição só em frente ativa; condição enviada para frente não-ativa é ignorada, não é erro).
-- `mudarCondição` agora compara valores **antes** de checar o ciclo (mesmo valor = no-op); mudar para valor diferente em frente não-ativa continua sendo erro.
-- **Instantâneo de leitura por render** em vez de cache global: nunca serve dado velho entre telas; escrita via instantâneo invalida; leitura que falhou não é memorizada.
-- Importação grava pais antes dos filhos (FK) e devolve `ErroParcial` com `completar`.
-- Produção não expõe código/detalhes internos; em `import.meta.env.DEV` a mensagem inclui código/detalhes/dica; logs redigem JWT/apikey/Bearer.
-- Render obsoleto (clique rápido + rede lenta) é descartado por contador de geração.
+**B. PostgreSQL REAL (16.15, local, bancos temporários) — `npm run test:pg`: 237 verificações, 0 falhas.** Mutação de teste (removido o conflito PU409 e a checagem de pai) → 16 falhas, confirmando sensibilidade. Cobre:
+- migrations: schema v1 + 001–004 + 005 aplicam sem erro (**primeira execução real de 001–004 em Postgres**); instalação nova (`supabase-schema-atual.sql` + 005); 005 idempotente (3×); recusa sem 001 e sem 004.
+- criação gera exatamente 1 evento; edição composta grava todos os eventos; hierarquia move com evento, recusa ciclo/auto-pai/pai inexistente.
+- **Rollback real**: evento inválido (CHECK) e triggers que lançam exceção no meio (evento, cache da frente, exclusão de árvore) → frente, registro e eventos voltam ao estado anterior.
+- `ultimo_movimento` em criar/editar data/editar "conta como movimento"/excluir/retroativo/sem movimento; cache corrompido é curado; valor do cliente ignorado.
+- árvore: sem registros/eventos órfãos; contagens; idempotente; ciclo corrompido não trava.
+- retry de resposta perdida (`ja_aplicada`, `ja_existia`, `ja_removido`) sem duplicar eventos/registros; conflito `PU409` preserva a alteração mais recente.
+- isolamento entre dois usuários via RPC (editar/registrar/excluir/ser pai do que é do outro → recusado ou no-op; nenhuma linha alterada); `anon` sem EXECUTE; `SECURITY INVOKER`; `search_path` fixo; nada executável por `PUBLIC`.
+- concorrência: 24 registros simultâneos (cache final correto, sem deadlock); 6 edições com a mesma base (1 aplicada, 5 conflitos); 5 criações idênticas simultâneas; 2 movimentos que formariam ciclo.
+- `SupabaseAdapter` + `frente-ops` sobre o Postgres (nos dois schemas): mesma suíte da memória/local; paginação real com 2500 linhas; erros do Postgres viram `ErroPulse` legível; 1 RPC por operação; sem a 005, "banco desatualizado" e nada gravado.
 
-## 6. Testes
+**C. Relatado pela usuária (Supabase real):** ver §3. Nada da 005.
 
-**Executados nesta sessão, todos passando:**
+**D. NÃO validado (limites reais):**
+- **Migration 005 no Supabase real** — não aplicada, não testada. `ClientePg` (teste) imita o supabase-js; **PostgREST/GoTrue/JWT reais não foram exercitados**: nomes/tipos de parâmetros RPC, retorno `jsonb`, exposição das funções (`notify pgrst, 'reload schema'` está na migration), `auth.uid()` real e o grant a `authenticated` precisam do smoke test do §7.
+- App publicado com a 005 no navegador (e2e só usa o modo local). Safari/iOS/Firefox. Tempo real em rede.
+- Importação (`importarPulse`): **continua não atômica** (parcial + `completar` em memória; sem UI). Não foi alterada nem declarada resolvida.
 
-| Comando | Resultado |
-|---|---|
-| `npm run typecheck` | limpo |
-| `npm run build` | ok (PWA gerado) |
-| `npm run test:dominio` (15 suites: motor 18, ops 21, histórico 32, estado 45, registro-query 31, hierarquia 26, portabilidade 27, ritmo 21, tendências 20, períodos 13, ui-cenarios 25, erros 44, supabase 53, leitura 12, consistência 59) | 0 falhas |
-| `npm run test:e2e` (Playwright 1.56, Chromium 141 do ambiente, build de produção) | **23/23** |
+## 6. Migrações e ordem de aplicação (ação da usuária)
 
-Cobertura e2e: Home vazia; criar/consultar/selecionar Frente e sub-frente; abrir Frente; registrar (incl. data retroativa); histórico; busca; editar/excluir registro; editar Frente concluída (regressão); excluir Frente; persistência após reload; Registrar global; Frente inexistente; falha de escrita (erro local, formulário preservado, retry sem duplicar); falha parcial + "Tentar completar"; falha de leitura + "Tentar de novo"; mobile 390×844 e 320×568, desktop 1280×800 (sem rolagem horizontal, controles dentro da tela, conteúdo final não coberto pela navegação, Home mostra atenção sem listar tudo).
-
-**NÃO validado / limites:**
-- Nada foi executado contra um **Supabase real**. O contrato adapter↔schema é verificado por um **interpretador SQL mínimo** (`test-storage-supabase.ts`) que **ignora blocos `DO $$`** (as precondições da 004 e a descoberta de constraint da 003 não são exercitadas). A migration 004 **nunca rodou em Postgres**.
-- Os testes de navegador usam só o `LocalStorageAdapter`. O caminho Supabase no navegador (login, rede, RLS) **não** foi testado em browser.
-- Só Chromium. Safari/iOS e Firefox não testados.
-- Tempos reais de carregamento em rede não foram medidos (só contagem de leituras).
-- Revisão visual feita por captura de tela em 390 px (Home e domínio); sem revisão estética profunda.
-
-## 7. Migrações e configuração pendentes (ação de Dani)
-
-1. Descobrir quais migrations o banco de Dani já tem. Verificação no SQL Editor:
+1. Estado atual do Supabase real: 001–004 aplicadas (§3). **005 pendente.**
+2. **Aplicar a 005 ANTES de publicar esta versão do app.** O app antigo segue funcionando com a 005 aplicada (migration aditiva); o app novo recusa gravar sem ela.
+3. Conferir no SQL Editor (esperado: 6 linhas; `prosecdef` = false; `anon_exec` = false; `auth_exec` = true):
    ```sql
-   select column_name, is_nullable from information_schema.columns
-   where table_schema='public' and table_name='frentes' order by ordinal_position;
-   select to_regclass('public.eventos_estruturais');
-   select column_name from information_schema.columns where table_name='registros' and column_name='criado_em';
+   select p.proname, p.prosecdef,
+          has_function_privilege('anon', p.oid, 'execute') as anon_exec,
+          has_function_privilege('authenticated', p.oid, 'execute') as auth_exec
+   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public' and p.proname like 'pulse\_%' order by 1;
    ```
-2. Aplicar **em ordem** as que faltarem: 001 → 002 → 003 → **004**. (A 004 aborta com mensagem clara se alguma anterior faltar.) Instalação nova: apenas `supabase-schema-atual.sql`.
-3. Depois da 004, conferir que `estado`, `ultimo_toque`, `opt_out_negligencia` aparecem com `is_nullable = YES`.
-4. `supabase-schema.sql` é o **v1 legado** — não usar em instalação nova.
-5. **Continua pendente** (decisão de Dani): relatório de conversão `optOutNegligência→pausada` com dados reais e, só depois, migration de **remoção** das colunas legadas.
+4. Instalação nova: `supabase-schema-atual.sql` + 005.
+5. **Continua pendente (decisão da usuária):** relatório de conversão `optOutNegligência→pausada` com dados reais; só depois, migration de **remoção** das colunas legadas.
 
-## 8. Bugs e riscos conhecidos
+## 7. Próxima tarefa recomendada (não iniciada): validar a 005 no Supabase real
 
-- **`completar()` vive só em memória.** Se o usuário recarregar depois de um `ErroParcial`, o evento pendente de uma *mudança* (condição/cadência/ciclo/hierarquia) se perde (o estado da frente fica correto; falta a linha no histórico). Para *criação*, repetir `criarFrente` com o mesmo id repara. Solução real: função/RPC transacional no Postgres (pendente).
-- **Leituras em lote carregam a tabela inteira** (paginadas de 1000 em 1000) a cada render. Adequado a uso pessoal; vira o próximo gargalo com dezenas de milhares de registros.
-- Sem fila offline: escrita sem rede falha (com mensagem) em vez de ficar pendente.
-- Duas abas editando a mesma frente: último a gravar vence.
-- Importação não é atômica (parcial + `completar`); e re-importar após parcial é rejeitado por colisão de ids (use `completar`).
-- Tela de login (`auth.ts`) mantém estilo inline antigo, fora do tema escuro; manifest PWA ainda declara `background_color #f5f2eb`/`theme_color #111111` (tema claro antigo). Não tocados (fora do escopo da Fase A).
-- `datetime-local` é interpretado no fuso do navegador.
+Critérios de aceitação (feitos pela usuária, com a conta real, após aplicar a 005 e publicar):
+1. Consulta do §6 devolve o esperado.
+2. Smoke test sem `[object Object]`: criar Frente → registrar → editar Frente (nome + condição) → mover para outra Frente → concluir → excluir registro → excluir Frente; recarregar entre os passos; histórico mostra os eventos certos, uma vez cada.
+3. Duas abas: abrir a mesma Frente nas duas, editar na A, editar na B sem recarregar → B mostra a mensagem de conflito e a edição da A permanece.
+4. Se algo falhar, copiar a mensagem (em modo dev traz código/detalhes) para ajustar o contrato.
+Só então revisar este pacote e partir para a Fase B (sistema de registros), sem misturar.
 
-## 9. Limitações do ambiente de desenvolvimento
+## 8. Riscos e problemas conhecidos
 
-Sandbox sem acesso ao Supabase de Dani; rede de saída apenas por allowlist; Chromium vem pré-instalado (`PLAYWRIGHT_BROWSERS_PATH`), por isso o Playwright rodou sem baixar nada.
+- **Contrato PostgREST não verificado** (item D acima): é o maior risco residual deste pacote.
+- Duas implementações da mesma regra (SQL e TS em `storage-atomico.ts`): paridade garantida só pelos testes compartilhados; mudar a regra exige mudar os dois.
+- Frente criada **antes** sem evento de criação (dados legados) não ganha o evento ao ser "recriada" com o mesmo id (antes ganhava). Sem impacto no fluxo normal.
+- Conflito (`PU409`) exige recarregar manualmente; edição perdida precisa ser refeita.
+- Importação não atômica; `ErroParcial`/"Tentar completar" existe só para ela (sem UI hoje).
+- Leituras em lote carregam as tabelas inteiras por render (paginadas de 1000); sem fila offline; escrita sem rede falha com mensagem.
+- Tela de login e `manifest` do PWA ainda no tema claro antigo (fora do escopo).
+- `datetime-local` interpretado no fuso do navegador.
+
+## 9. Decisões técnicas
+
+- Atomicidade na camada do `StorageAdapter`, regras de domínio em TS, SQL só para transação/concorrência/segurança.
+- Sem coluna de versão: CAS pelo conteúdo "esperado" (campos controlados pelo app; `ultimo_movimento` excluído por ser derivado).
+- Sem fallback não atômico quando a RPC falta: falha explícita é preferível a consistência silenciosamente quebrada.
+- `SECURITY INVOKER` + RLS existente, em vez de DEFINER com verificação manual de dono.
+- Testes em PostgreSQL real separados de `test:dominio` (que roda sem banco); `test:pg` sai com código 2 se não houver PostgreSQL (não finge sucesso).
 
 ## 10. Como rodar
 
-`npm install` → `npm run typecheck` → `npm run test:dominio` → `npm run build` → `npm run test:e2e` (builda e sobe `vite preview` na 4173 sozinho). Pacote de código sem `node_modules`/`dist`.
-
-## 11. Próxima tarefa recomendada (não iniciada)
-
-**Fase B — Validar contra o Supabase real e fechar atomicidade.** Critérios de aceitação:
-1. Dani aplica 001–004 (ou schema atual) e as verificações do §7 retornam o esperado.
-2. Smoke test manual com login real: criar Frente, registrar, editar Frente concluída, excluir registro, recarregar — sem erro; sem `[object Object]`.
-3. Se aparecerem erros reais, o texto mostrado em modo DEV traz código/detalhes que permitem corrigir o contrato.
-4. Funções SQL transacionais (RPC) para: criar frente+evento, mudar estado+eventos, mover frente+evento, excluir em cascata — adapter passa a usá-las; `ErroParcial` fica só como fallback.
-5. Teste e2e de caminho Supabase com rede simulada (`page.route`) cobrindo erro 23502/401/rede.
-Só depois: Fase 3 do roadmap (captura/estrutura/import-export na UI).
+`npm install` → `npm run typecheck` → `npm run test:dominio` → `npm run build` → `npm run test:e2e`. Com PostgreSQL local: `npm run test:pg` (README, "Testes com PostgreSQL real"). Pacote sem `node_modules`/`dist`/`.env*`.

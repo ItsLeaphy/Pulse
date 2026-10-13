@@ -43,6 +43,10 @@ class Contador implements StorageAdapter {
   getTodosEventosEstruturais = () => this.l(() => this.base.getTodosEventosEstruturais())
   salvarEventoEstrutural = (e: Parameters<StorageAdapter['salvarEventoEstrutural']>[0]) => this.base.salvarEventoEstrutural(e)
   removerEventoEstrutural = (id: string) => this.base.removerEventoEstrutural(id)
+  salvarFrenteComEventos = (...a: Parameters<StorageAdapter['salvarFrenteComEventos']>) => this.base.salvarFrenteComEventos(...a)
+  salvarRegistroComCache = (...a: Parameters<StorageAdapter['salvarRegistroComCache']>) => this.base.salvarRegistroComCache(...a)
+  removerRegistroComCache = (id: string) => this.base.removerRegistroComCache(id)
+  removerFrenteEmCascata = (id: string) => this.base.removerFrenteEmCascata(id)
 }
 
 const DIA = 86_400_000

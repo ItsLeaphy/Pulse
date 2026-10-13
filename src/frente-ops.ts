@@ -1,7 +1,8 @@
 import type { StorageAdapter } from './storage'
 import type { Frente, Registro, CicloVida, Condição, EventoEstrutural } from './types'
 import { novoId } from './id'
-import { ErroParcial, ErroValidação, normalizarErro } from './erros'
+import { ErroValidação } from './erros'
+import { descendentesDe } from './storage-atomico'
 
 // ============================================================
 // OPERAÇÕES DE FRENTE E DE REGISTRO
@@ -9,11 +10,19 @@ import { ErroParcial, ErroValidação, normalizarErro } from './erros'
 // da UI (que só deve renderizar e delegar) e fora de storage.ts
 // (que só deve ler/escrever uma linha por vez).
 //
-// Este é o único lugar que deve gerar EventoEstrutural e o único
-// lugar que deve recalcular Frente.últimoMovimento. A UI nunca
+// Este é o único lugar que deve gerar EventoEstrutural. A UI nunca
 // deve chamar storage.salvarRegistro / storage.salvarFrente
-// diretamente para essas mutações — sempre por aqui, ou o cache
-// de últimoMovimento e os eventos ficam inconsistentes.
+// diretamente para essas mutações — sempre por aqui.
+//
+// CONSISTÊNCIA: cada operação daqui decide o que mudar (regras de
+// domínio, em TypeScript) e entrega ao storage UMA chamada atômica
+// (salvarFrenteComEventos / salvarRegistroComCache /
+// removerRegistroComCache / removerFrenteEmCascata). No Supabase isso é
+// uma função RPC = uma transação do Postgres; nos adapters locais, um
+// cálculo puro seguido de gravação com reversão. Resultado: nunca
+// existe "frente salva sem o evento" nem "registro salvo sem o cache
+// atualizado". Frente.últimoMovimento é recalculado pelo storage, a
+// partir dos registros, dentro da mesma transação.
 // ============================================================
 
 /**
@@ -33,91 +42,12 @@ export function montarEvento(
   return { id: novoId(), frenteId, tipo, valorAnterior, valorNovo, criadoEm: agora }
 }
 
-export async function registrarEvento(
-  storage: StorageAdapter,
-  frenteId: string,
-  tipo: EventoEstrutural['tipo'],
-  valorAnterior: string | null,
-  valorNovo: string | null,
-  agora: number = Date.now()
-): Promise<void> {
-  await storage.salvarEventoEstrutural(montarEvento(frenteId, tipo, valorAnterior, valorNovo, agora))
-}
-
-/**
- * Grava eventos já montados DEPOIS de a mudança de estado ter sido
- * salva. Se algum falhar, a mudança de estado já está no banco — não é
- * uma falha total. Lança ErroParcial com `completar`, que grava só os
- * eventos que faltam. Os eventos têm ids fixos (montados antes), então
- * repetir `completar` é idempotente (upsert por id): nunca duplica.
- */
-export async function gravarEventos(
-  storage: StorageAdapter,
-  operação: string,
-  concluído: string[],
-  eventos: EventoEstrutural[]
-): Promise<void> {
-  const faltam = [...eventos]
-  while (faltam.length > 0) {
-    const próximo = faltam[0]!
-    try {
-      await storage.salvarEventoEstrutural(próximo)
-    } catch (err) {
-      throw new ErroParcial(
-        operação,
-        concluído,
-        ['registro da mudança no histórico'],
-        err,
-        () => gravarEventos(storage, operação, concluído, faltam)
-      )
-    }
-    faltam.shift()
-  }
-}
-
 // ============================================================
 // REGISTRO — Registro é a fonte de verdade; Frente.últimoMovimento
 // é cache derivado. Toda mutação de registro passa por aqui, que
 // sempre termina recalculando o cache a partir do storage real
 // (não incrementalmente) — mais simples e impossível de divergir.
 // ============================================================
-
-/**
- * Recalcula e persiste Frente.últimoMovimento a partir dos
- * Registros reais desta frente: é a maior `data` entre os
- * registros com contaComoMovimento=true, ou null se não houver
- * nenhum. Chamada ao final de criar/editar/excluir registro —
- * nunca incrementa o valor "na mão", sempre deriva do zero pra
- * nunca poder divergir da fonte de verdade.
- */
-async function recalcularÚltimoMovimento(storage: StorageAdapter, frenteId: string): Promise<void> {
-  const frente = await storage.getFrente(frenteId)
-  if (!frente) return // frente pode já ter sido excluída — nada a recalcular
-
-  const registros = await storage.getRegistros(frenteId)
-  const movimentos = registros.filter((r) => r.contaComoMovimento).map((r) => r.data)
-  const últimoMovimento = movimentos.length > 0 ? Math.max(...movimentos) : null
-
-  if (frente.últimoMovimento !== últimoMovimento) {
-    await storage.salvarFrente({ ...frente, últimoMovimento })
-  }
-}
-
-/**
- * O registro (fonte de verdade) já foi gravado; se só o recálculo do
- * cache falhar, isso é parcial — e reparável: o recálculo parte do
- * zero, então repetir `completar` (ou qualquer próxima mutação de
- * registro dessa frente) corrige.
- */
-async function atualizarCacheOuParcial(storage: StorageAdapter, operação: string, frenteId: string): Promise<void> {
-  try {
-    await recalcularÚltimoMovimento(storage, frenteId)
-  } catch (err) {
-    throw new ErroParcial(operação, ['registro gravado'], ['atualização do último movimento'], err, () =>
-      recalcularÚltimoMovimento(storage, frenteId)
-    )
-  }
-}
 
 /**
  * Cria um registro e recalcula o cache da frente associada.
@@ -138,9 +68,9 @@ export async function criarRegistro(
     id: dados.id ?? novoId(),
     criadoEm: dados.criadoEm ?? Date.now()
   }
-  await storage.salvarRegistro(registro)
-  await atualizarCacheOuParcial(storage, 'Registrar', registro.frenteId)
-  return registro
+  // idempotente por id: repetir (resposta perdida) não duplica nem sobrescreve
+  const { registro: gravado } = await storage.salvarRegistroComCache(registro, null)
+  return gravado
 }
 
 /**
@@ -159,18 +89,19 @@ export async function editarRegistro(
   if (!atual) throw new Error(`Registro ${id} não encontrado`)
 
   const atualizado: Registro = { ...atual, ...mudanças }
-  await storage.salvarRegistro(atualizado)
-  await atualizarCacheOuParcial(storage, 'Editar registro', atualizado.frenteId)
-  return atualizado
+  // `atual` é o estado que o chamador viu: se mudou em outro lugar, o storage recusa (conflito)
+  const { registro } = await storage.salvarRegistroComCache(atualizado, atual)
+  return registro
 }
 
-/** Exclui um registro e recalcula o cache da frente associada. */
-export async function excluirRegistro(storage: StorageAdapter, id: string, frenteIdConhecida?: string): Promise<void> {
-  const atual = await encontrarRegistro(storage, id, frenteIdConhecida)
-  if (!atual) return // já não existe — nada a fazer
-
-  await storage.removerRegistro(id)
-  await atualizarCacheOuParcial(storage, 'Excluir registro', atual.frenteId)
+/**
+ * Exclui um registro e recalcula o cache da frente associada (juntos,
+ * numa operação atômica). Idempotente: registro que já não existe é
+ * no-op. `frenteIdConhecida` é mantido por compatibilidade de contrato
+ * e não é mais necessário: o storage sabe a frente do registro.
+ */
+export async function excluirRegistro(storage: StorageAdapter, id: string, _frenteIdConhecida?: string): Promise<void> {
+  await storage.removerRegistroComCache(id)
 }
 
 /**
@@ -203,10 +134,10 @@ function validarCadência(c: number | null): void {
 /**
  * Cria uma frente nova e grava o evento de criação.
  *
- * Idempotente por id: repetir a chamada com o mesmo `id` (retry depois
- * de falha parcial) NÃO duplica a frente nem o evento de criação — se a
+ * Atômica e idempotente por id: repetir a chamada com o mesmo `id`
+ * (resposta perdida) NÃO duplica a frente nem o evento de criação — se a
  * frente já existe, ela é preservada como está (não zera últimoMovimento
- * nem criadaEm) e só o que falta é gravado.
+ * nem criadaEm).
  */
 export async function criarFrente(
   storage: StorageAdapter,
@@ -218,18 +149,13 @@ export async function criarFrente(
     throw new ErroValidação('A frente-mãe não existe mais. Volte e escolha outra.')
   }
 
-  const existente = await storage.getFrente(dados.id)
-  const agora = dados.criadaEm ?? Date.now()
-  const frente: Frente = existente ?? { ...dados, criadaEm: agora, últimoMovimento: null }
-  if (!existente) await storage.salvarFrente(frente)
-
-  const eventos = await storage.getEventosEstruturais(frente.id)
-  if (!eventos.some((e) => e.tipo === 'criação')) {
-    await gravarEventos(storage, 'Criar frente', ['frente criada'], [
-      montarEvento(frente.id, 'criação', null, null, frente.criadaEm)
-    ])
-  }
-  return frente
+  const frente: Frente = { ...dados, criadaEm: dados.criadaEm ?? Date.now(), últimoMovimento: null }
+  const evento = montarEvento(frente.id, 'criação', null, null, frente.criadaEm)
+  // frente + evento de criação numa só transação. Idempotente por id:
+  // se já existe (retry de resposta perdida), nada é sobrescrito e
+  // nenhum evento extra é criado.
+  const { frente: salva } = await storage.salvarFrenteComEventos(frente, [evento], null)
+  return salva
 }
 
 /**
@@ -265,13 +191,11 @@ export async function mudarCicloVida(
   const condiçãoMudou = atual.condição !== novaCondição
 
   const atualizada: Frente = { ...atual, cicloVida: novoCicloVida, condição: novaCondição }
-  await storage.salvarFrente(atualizada)
   const eventos = [montarEvento(frenteId, 'ciclo_vida_mudou', atual.cicloVida, novoCicloVida, agora)]
   if (condiçãoMudou) {
     eventos.push(montarEvento(frenteId, 'condição_mudou', atual.condição, novaCondição, agora))
   }
-  await gravarEventos(storage, 'Mudar ciclo de vida', ['mudança de ciclo de vida'], eventos)
-  return atualizada
+  return (await storage.salvarFrenteComEventos(atualizada, eventos, atual)).frente
 }
 
 /**
@@ -299,11 +223,8 @@ export async function mudarCondição(
   }
 
   const atualizada: Frente = { ...atual, condição: novaCondição }
-  await storage.salvarFrente(atualizada)
-  await gravarEventos(storage, 'Mudar condição', ['mudança de condição'], [
-    montarEvento(frenteId, 'condição_mudou', atual.condição, novaCondição, agora)
-  ])
-  return atualizada
+  const eventos = [montarEvento(frenteId, 'condição_mudou', atual.condição, novaCondição, agora)]
+  return (await storage.salvarFrenteComEventos(atualizada, eventos, atual)).frente
 }
 
 /**
@@ -322,8 +243,7 @@ export async function mudarCadência(
   validarCadência(novaCadência)
 
   const atualizada: Frente = { ...atual, cadênciaEsperada: novaCadência }
-  await storage.salvarFrente(atualizada)
-  await gravarEventos(storage, 'Mudar cadência', ['mudança de cadência'], [
+  const eventos = [
     montarEvento(
       frenteId,
       'cadência_mudou',
@@ -331,16 +251,17 @@ export async function mudarCadência(
       novaCadência === null ? null : String(novaCadência),
       agora
     )
-  ])
-  return atualizada
+  ]
+  return (await storage.salvarFrenteComEventos(atualizada, eventos, atual)).frente
 }
 
 /**
- * Edição de frente em UMA gravação da linha (nome, área, tipo, contexto,
+ * Edição de frente em UMA operação atômica (nome, área, tipo, contexto,
  * ciclo de vida, condição, cadência) + os eventos estruturais das
- * mudanças reais. Substitui a sequência salvarFrente + mudarCicloVida +
- * mudarCondição + mudarCadência (4+ gravações que podiam parar no meio
- * e que falhavam em qualquer frente concluída/arquivada).
+ * mudanças reais, tudo na mesma transação. Substitui a sequência
+ * salvarFrente + mudarCicloVida + mudarCondição + mudarCadência (4+
+ * gravações que podiam parar no meio e que falhavam em qualquer frente
+ * concluída/arquivada).
  *
  * Mesmas invariantes de mudarCicloVida/mudarCondição: sair/entrar de
  * 'ativa' leva a condição a 'normal'; condição só vale em frente ativa
@@ -413,29 +334,14 @@ export async function editarFrente(
   const mudouAlgo = eventos.length > 0 || JSON.stringify(atual) !== JSON.stringify(atualizada)
   if (!mudouAlgo) return atual
 
-  await storage.salvarFrente(atualizada)
-  await gravarEventos(storage, 'Editar frente', ['alterações da frente salvas'], eventos)
-  return atualizada
+  return (await storage.salvarFrenteComEventos(atualizada, eventos, atual)).frente
 }
 
 // ============================================================
 // EXCLUSÃO EM CASCATA (destrutiva — ver nota no fim do arquivo)
 // ============================================================
 
-/**
- * Descendentes (filhos, netos...) a partir de uma lista de frentes já
- * carregada — sem tocar o storage. Mesma ordem de sempre (diretos,
- * depois os de cada direto) e protegida contra ciclo em dado corrompido.
- */
-export function descendentesDe(id: string, todas: Frente[], visitados: Set<string> = new Set([id])): string[] {
-  const diretos = todas.filter((f) => f.parentId === id && !visitados.has(f.id)).map((f) => f.id)
-  diretos.forEach((d) => visitados.add(d))
-  let todos = [...diretos]
-  for (const filhoId of diretos) {
-    todos = todos.concat(descendentesDe(filhoId, todas, visitados))
-  }
-  return todos
-}
+export { descendentesDe }
 
 /** Todos os ids descendentes de uma frente — uma única leitura de frentes. */
 export async function coletarDescendentes(id: string, storage: StorageAdapter): Promise<string[]> {
@@ -444,51 +350,16 @@ export async function coletarDescendentes(id: string, storage: StorageAdapter): 
 
 /**
  * Exclui uma frente, todos os seus descendentes e todos os registros
- * e eventos estruturais associados. Funciona igual em qualquer
- * adapter — não depende de cascade delete do banco.
+ * e eventos estruturais associados — numa única operação atômica
+ * (no Supabase: função RPC / uma transação; nos adapters locais:
+ * cálculo puro + gravação com reversão). Ou some tudo, ou nada muda:
+ * não existe mais "exclusão pela metade". Idempotente: frente que já
+ * não existe é no-op.
  *
- * Esta continua sendo operação destrutiva separada — a 2.0 prioriza
- * arquivar (mudarCicloVida para 'arquivada') sobre excluir; esta
- * função é só para a exclusão permanente deliberada.
- *
- * Ordem: registros e eventos primeiro, frentes por último (das mais
- * profundas para a raiz). Se parar no meio, a frente-raiz ainda existe
- * e repetir a operação continua de onde parou (remoções são
- * idempotentes) — daí o ErroParcial com `completar`. Sem a frente
- * (já excluída), não faz nada.
+ * Operação destrutiva separada — a 2.0 prioriza arquivar
+ * (mudarCicloVida para 'arquivada') sobre excluir; esta função é só
+ * para a exclusão permanente deliberada.
  */
 export async function excluirFrenteComFilhos(id: string, storage: StorageAdapter): Promise<void> {
-  const frentes = await storage.getFrentes()
-  if (!frentes.some((f) => f.id === id)) return
-
-  const todosIds = [id, ...descendentesDe(id, frentes)]
-  const conjunto = new Set(todosIds)
-  const registros = (await storage.getTodosRegistros()).filter((r) => conjunto.has(r.frenteId))
-  const eventos = (await storage.getTodosEventosEstruturais()).filter((e) => conjunto.has(e.frenteId))
-
-  let removidos = 0
-  const resumo = () => (removidos === 0 ? ['nada removido ainda'] : [`${removidos} item(ns) já removido(s)`])
-  try {
-    const trabalhos: (() => Promise<void>)[] = [
-      ...registros.map((r) => () => storage.removerRegistro(r.id)),
-      ...eventos.map((e) => () => storage.removerEventoEstrutural(e.id))
-    ]
-    const LOTE = 8
-    for (let i = 0; i < trabalhos.length; i += LOTE) {
-      await Promise.all(trabalhos.slice(i, i + LOTE).map((t) => t()))
-      removidos += Math.min(LOTE, trabalhos.length - i)
-    }
-    for (const fid of [...todosIds].reverse()) {
-      await storage.removerFrente(fid)
-      removidos++
-    }
-  } catch (err) {
-    throw new ErroParcial(
-      'Excluir frente',
-      resumo(),
-      ['o restante da exclusão'],
-      normalizarErro(err, 'excluir a frente'),
-      () => excluirFrenteComFilhos(id, storage)
-    )
-  }
+  await storage.removerFrenteEmCascata(id)
 }
